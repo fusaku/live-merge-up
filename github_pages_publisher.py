@@ -8,7 +8,6 @@ import shutil
 import time
 import subprocess
 import re
-import glob
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
@@ -134,13 +133,19 @@ class GitHubPagesPublisher:
                     # 查找匹配的字幕文件
                     for ext in SUBTITLE_EXTENSIONS:
                         subtitle_file = comments_dir / f"{video_filename}{ext}"
-                        if subtitle_file.exists():
-                            self.log(f"找到字幕文件: {subtitle_file}")
-                            return subtitle_file
-        
+                        # 带重试的文件存在检查
+                        for attempt in range(3):  # 重试3次
+                            if subtitle_file.exists():
+                                self.log(f"找到字幕文件: {subtitle_file}")
+                                return subtitle_file
+
+                            if attempt < 2:  # 前两次失败时等待
+                                time.sleep(3)  # 等待3秒
+                                self.log(f"字幕文件检查重试 {attempt + 1}/3: {subtitle_file.name}")
+
         self.log(f"未找到字幕文件: {video_filename}", "WARNING")
         return None
-    
+
     def move_subtitle_file(self, subtitle_file: Path, video_id: str) -> bool:
         """移动字幕文件并重命名为视频ID"""
         try:

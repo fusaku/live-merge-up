@@ -1,8 +1,8 @@
 import time
 import subprocess
-from pathlib import Path
 import fcntl
 import os
+from pathlib import Path
 from config import *
 
 # 尝试导入上传模块，如果不存在则跳过
@@ -51,87 +51,66 @@ class FileLock:
             except:
                 pass
 
-def should_merge_folders(folder1: Path, folder2: Path, date_str: str = None):
-    """判断两个文件夹是否应该合并（第一个有字幕，第二个没有）"""
-    if not ENABLE_SUBTITLE_BASED_MERGE:
-        return False
-        
-    if date_str is None:
-        # 使用文件夹的修改时间来确定日期，而不是今天的日期
-        from datetime import datetime
-        folder_time = datetime.fromtimestamp(folder1.stat().st_mtime)
-        date_str = folder_time.strftime("%Y-%m-%d")
-    
-    # 构建完整的字幕目录路径
-    subtitle_dir = SUBTITLE_ROOT / date_str / SUBTITLE_SUBPATH
-    sub1 = subtitle_dir / f"{folder1.name}.ass"
-    sub2 = subtitle_dir / f"{folder2.name}.ass"
-
-    if DEBUG_MODE:
-        print(f"检查字幕: {sub1} ({'存在' if sub1.exists() else '不存在'})")
-        print(f"检查字幕: {sub2} ({'存在' if sub2.exists() else '不存在'})")
-    
-    return sub1.exists() and not sub2.exists()
-
-def create_merged_filelist(folder1: Path, folder2: Path):
-    """创建合并的filelist.txt"""
-    TEMP_MERGED_DIR.mkdir(parents=True, exist_ok=True)
-    merged_name = f"{folder1.name}_{folder2.name}_merged"
-    merged_file = TEMP_MERGED_DIR / f"{merged_name}.txt"
-    
-    with open(folder1 / FILELIST_NAME, 'r') as f1, \
-         open(folder2 / FILELIST_NAME, 'r') as f2, \
-         open(merged_file, 'w') as out:
-        out.writelines(f1.readlines())
-        out.writelines(f2.readlines())
-    
-    return merged_file, merged_name
-
 def find_ready_folders(parent_dir: Path):
-    """查找所有准备好合并的文件夹，考虑字幕合并策略"""
+    """查找所有准备好合并的文件夹，按名称排序合并"""
     folders = [f for f in parent_dir.iterdir() if f.is_dir()]
-    ready_items = []  # 改为存储合并项目而不是文件夹
     
-    # 先找出所有有filelist.txt但没有.mp4的文件夹
+    # 找出所有有filelist.txt但没有.mp4的文件夹
     candidate_folders = []
     for folder in folders:
+        # 检查是否有合并标记文件
+        merged_marker = folder / ".merged"
+        if merged_marker.exists():
+            continue
+            
         filelist_txt = folder / FILELIST_NAME
         output_file = OUTPUT_DIR / f"{folder.name}{OUTPUT_EXTENSION}"
         if filelist_txt.exists() and not output_file.exists():
             candidate_folders.append(folder)
     
-    # 按时间排序
-    candidate_folders.sort(key=lambda x: x.stat().st_mtime)
+    if not candidate_folders:
+        return []
     
-    # 应用合并策略
-    i = 0
-    while i < len(candidate_folders):
-        current = candidate_folders[i]
-        
-        # 检查是否能与下一个文件夹合并
-        if i + 1 < len(candidate_folders):
-            next_folder = candidate_folders[i + 1]
-            if should_merge_folders(current, next_folder):
-                merged_file, merged_name = create_merged_filelist(current, next_folder)
-                ready_items.append({
-                    'type': 'merged',
-                    'filelist': merged_file,
-                    'name': merged_name,
-                    'folders': [current, next_folder]
-                })
-                i += 2  # 跳过下一个
-                continue
-        
-        # 单独处理
-        ready_items.append({
+    # 按文件夹名称排序（从小到大）
+    candidate_folders.sort(key=lambda x: x.name)
+    
+    # 创建一个合并项目，包含所有待合并的文件夹
+    if len(candidate_folders) == 1:
+        # 如果只有一个文件夹，直接处理
+        folder = candidate_folders[0]
+        return [{
             'type': 'single',
-            'filelist': current / FILELIST_NAME,
-            'name': current.name,
-            'folders': [current]
-        })
-        i += 1
+            'filelist': folder / FILELIST_NAME,
+            'name': folder.name,
+            'folders': [folder]
+        }]
+    else:
+        # 如果有多个文件夹，合并成一个
+        merged_name = candidate_folders[0].name  # 使用第一个文件夹的名称
+        merged_filelist = create_combined_filelist(candidate_folders, merged_name)
+        return [{
+            'type': 'merged',
+            'filelist': merged_filelist,
+            'name': merged_name,
+            'folders': candidate_folders
+        }]
+
+def create_combined_filelist(folders_list, merged_name):
+    """创建合并的filelist.txt"""
+    temp_dir = Path(OUTPUT_DIR) / ".temp"
+    temp_dir.mkdir(parents=True, exist_ok=True)
     
-    return ready_items
+    merged_file = temp_dir / f"{merged_name}_combined.txt"
+    
+    # 合并所有文件夹的 filelist.txt
+    with open(merged_file, 'w') as out:
+        for folder in folders_list:
+            filelist_path = folder / FILELIST_NAME
+            if filelist_path.exists():
+                with open(filelist_path, 'r') as f:
+                    out.writelines(f.readlines())
+    
+    return merged_file
 
 def merge_item(item: dict) -> bool:
     """合并单个项目（可能是单个文件夹或合并的文件夹）"""
@@ -182,6 +161,11 @@ def merge_item(item: dict) -> bool:
 
         if result.returncode == 0:
             print(f"{name} 合并完成")
+            # 新增：为所有被合并的文件夹创建标记文件
+            if item['type'] == 'merged':
+                for folder in item['folders']:
+                    marker_file = folder / ".merged"
+                    marker_file.write_text(f"已合并到: {name}\n时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
             return True
         else:
             print(f"{name} 合并失败，请检查 ffmpeg 日志")
@@ -209,18 +193,9 @@ def upload_if_needed(success_count):
     if success_count > 0:
         if ENABLE_AUTO_UPLOAD and UPLOAD_AVAILABLE:
             print("检测是否有已经合并,还未上传的视频")
-            upload_all_pending_videos(OUTPUT_DIR)
+            #upload_all_pending_videos(OUTPUT_DIR)
         elif ENABLE_AUTO_UPLOAD and not UPLOAD_AVAILABLE:
             print("自动上传已启用但上传模块不可用")
-
-def main_loop():
-    """主循环：持续检查并合并准备好的视频"""
-    print("开始监控待合并文件...")
-    
-    while True:
-        success_count = merge_all_ready()
-        upload_if_needed(success_count)
-        time.sleep(MERGE_CHECK_INTERVAL)
 
 def merge_once():
     """执行一次合并检查（用于脚本调用）"""
@@ -233,4 +208,4 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--once":
         merge_once()
     else:
-        main_loop()
+        merge_once()

@@ -5,18 +5,12 @@ PARENT_DIR = Path("~/Downloads/Showroom/active").expanduser()  # 所有直播文
 OUTPUT_DIR = Path("~/Videos/merged").expanduser()  # 输出合并视频和日志的目录
 
 # ========================= 检查配置 =========================
-CHECK_INTERVAL = 30  # 每次检测间隔秒数
+CHECK_INTERVAL = 90  # 每次检测间隔秒数
 LIVE_INACTIVE_THRESHOLD = 90  # 判定直播结束的空闲秒数
 MAX_WORKERS = 1  # 并发线程数
 LIVE_CHECK_INTERVAL = 60  # 直播中检查文件的间隔秒数
 MIN_FILES_FOR_CHECK = 5  # 开始检查的最小文件数量
 FILE_STABLE_TIME = 5  # 文件稳定时间（秒），超过这个时间没修改的文件才检查
-
-# ========================= 智能文件夹切换检测配置 =========================
-ENABLE_SMART_FOLDER_DETECTION = True  # 启用智能文件夹切换检测
-FOLDER_SWITCH_EXTENDED_WAIT = True     # 检测到文件夹切换时使用延长的等待时间
-EXTENDED_INACTIVE_MULTIPLIER = 1      # 延长等待时间的倍数（相对于LIVE_INACTIVE_THRESHOLD）
-MIN_FOLDER_AGE_FOR_FINALIZE = 30      # 文件夹最小存在时间才能结束检查（秒）
 
 # ========================= 多文件夹处理配置 =========================
 PROCESS_ALL_FOLDERS = True  # 是否处理所有文件夹（True）还是只处理最新的（False）
@@ -28,8 +22,6 @@ SUBTITLE_ROOT = Path("/home/ubuntu/Downloads/Showroom").expanduser() # 字幕文
 SUBTITLE_SUBPATH = "AKB48/comments"  # 日期目录下的子路径
 ENABLE_SUBTITLE_BASED_MERGE = True  # 是否启用基于字幕的智能合并
 TEMP_MERGED_DIR = PARENT_DIR / "temp_merged"  # 临时合并文件目录
-# ========================= 合并配置 =========================
-MERGE_CHECK_INTERVAL = 30  # 合并检查间隔秒数
 
 # ========================= 文件名配置 =========================
 FILELIST_NAME = "filelist.txt"  # 文件列表文件名
@@ -75,6 +67,7 @@ EN_TO_JP = {
 YOUTUBE_DEFAULT_TITLE = ""  # 默认标题（空字符串时使用文件名）
 YOUTUBE_DEFAULT_DESCRIPTION = """
 橋本陽菜
+コメント付き：https://www.kg46.com (テスト中)
 {upload_time}
 
 #AKB48 #Team8 #橋本陽菜
@@ -88,7 +81,7 @@ YOUTUBE_DEFAULT_TAGS = [
 ]  # 默认标签
 
 YOUTUBE_DEFAULT_CATEGORY_ID = "22"  # 默认分类ID (24=娱乐)
-YOUTUBE_PRIVACY_STATUS = "unlisted"  # 隐私状态: private, public, unlisted
+YOUTUBE_PRIVACY_STATUS = "public"  # 隐私状态: private, public, unlisted
 
 # 播放列表配置
 YOUTUBE_PLAYLIST_ID = ""  # 播放列表ID（空字符串表示不添加到播放列表）

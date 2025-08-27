@@ -4,6 +4,8 @@ from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import *
+from merger import merge_once
+from monitor_showroom import is_live
 
 def find_all_live_folders(parent_dir: Path):
     """获取所有直播文件夹路径"""
@@ -45,87 +47,6 @@ def is_live_active(ts_dir: Path):
     seconds_since_last_update = time.time() - latest_mtime
     return seconds_since_last_update <= LIVE_INACTIVE_THRESHOLD
 
-def is_newer_folder_active(ts_dir: Path, all_folders: list):
-    """
-    检查是否有更新的文件夹正在活跃
-    这个函数帮助判断当前文件夹是否因为录制切换到新文件夹而变得不活跃
-    """
-    if not ENABLE_SMART_FOLDER_DETECTION:
-        return False, None
-        
-    current_dir_mtime = ts_dir.stat().st_mtime
-    
-    for folder in all_folders:
-        # 跳过当前文件夹
-        if folder == ts_dir:
-            continue
-            
-        # 如果找到比当前文件夹更新的活跃文件夹
-        if folder.stat().st_mtime > current_dir_mtime:
-            if is_live_active(folder):
-                return True, folder
-    
-    return False, None
-
-def should_finalize_folder(ts_dir: Path, all_folders: list, folder_states: dict):
-    """
-    智能判断是否应该结束文件夹的检查
-    考虑多种因素：
-    1. 文件夹本身的活跃状态
-    2. 是否有更新的活跃文件夹
-    3. 文件夹的"冷却期"
-    4. 文件夹最小存在时间
-    """
-    current_time = time.time()
-    
-    # 基本检查：如果文件夹仍然活跃，不要结束
-    if is_live_active(ts_dir):
-        return False, "文件夹仍在活跃中"
-    
-    # 检查文件夹最小存在时间
-    state = folder_states.get(ts_dir, {})
-    creation_time = state.get('creation_time', current_time)
-    folder_age = current_time - creation_time
-    
-    if folder_age < MIN_FOLDER_AGE_FOR_FINALIZE:
-        return False, f"文件夹创建时间过短 ({folder_age:.0f}/{MIN_FOLDER_AGE_FOR_FINALIZE} 秒)"
-    
-    # 检查是否有更新的活跃文件夹
-    has_newer_active, newer_folder = is_newer_folder_active(ts_dir, all_folders)
-    
-    # 获取文件夹状态
-    last_activity_time = state.get('last_activity_time', 0)
-    
-    # 更新最后活跃时间
-    ts_files = list(ts_dir.glob("*.ts"))
-    if ts_files:
-        latest_mtime = max(f.stat().st_mtime for f in ts_files)
-        if latest_mtime > last_activity_time:
-            folder_states[ts_dir]['last_activity_time'] = latest_mtime
-            last_activity_time = latest_mtime
-    
-    # 计算文件夹不活跃的时间
-    inactive_duration = current_time - last_activity_time
-    
-    # 如果有更新的活跃文件夹，并且当前文件夹已经不活跃足够长时间
-    if has_newer_active:
-        # 对于有新文件夹的情况，使用更长的等待时间确保文件传输完成
-        if FOLDER_SWITCH_EXTENDED_WAIT:
-            extended_threshold = LIVE_INACTIVE_THRESHOLD * (1 + EXTENDED_INACTIVE_MULTIPLIER)
-        else:
-            extended_threshold = LIVE_INACTIVE_THRESHOLD
-            
-        if inactive_duration > extended_threshold:
-            return True, f"检测到更新的活跃文件夹 {newer_folder.name}，当前文件夹已不活跃 {inactive_duration:.0f} 秒"
-        else:
-            return False, f"等待文件夹彻底结束 (已等待 {inactive_duration:.0f}/{extended_threshold} 秒)"
-    
-    # 如果没有更新的活跃文件夹，使用标准阈值
-    if inactive_duration > LIVE_INACTIVE_THRESHOLD:
-        return True, f"文件夹已不活跃 {inactive_duration:.0f} 秒，无其他活跃文件夹"
-    
-    return False, f"等待文件夹结束 (已等待 {inactive_duration:.0f}/{LIVE_INACTIVE_THRESHOLD} 秒)"
-
 def has_been_merged(ts_dir: Path):
     """判断该直播是否已经合并过"""
     return (ts_dir / FILELIST_NAME).exists()
@@ -134,6 +55,16 @@ def has_files_to_check(ts_dir: Path):
     """检查文件夹是否有足够的文件可以开始检查"""
     ts_files = list(ts_dir.glob("*.ts"))
     return len(ts_files) >= MIN_FILES_FOR_CHECK
+
+def all_folders_completed(folders):
+    """检查所有文件夹是否都已完成检查（都有filelist.txt）"""
+    if not folders:
+        return False
+    
+    for folder in folders:
+        if not has_been_merged(folder):
+            return False
+    return True
 
 def check_live_folder_incremental(ts_dir: Path, checked_files: set, valid_files: list, error_logs: list):
     """增量检查直播文件夹中的新文件"""
@@ -289,7 +220,6 @@ def process_single_folder(ts_dir: Path, folder_states: dict, all_folders: list, 
             'valid_files': [],
             'error_logs': [],
             'last_check': 0,
-            'last_activity_time': 0,
             'creation_time': current_time
         }
     
@@ -308,36 +238,23 @@ def process_single_folder(ts_dir: Path, folder_states: dict, all_folders: list, 
             print(f"直播 {base_name} 文件数量不足({ts_count}/{MIN_FILES_FOR_CHECK})，等待中...")
         return False  # 返回False表示该文件夹还不能处理
     
-    # 智能判断是否应该结束文件夹检查
-    should_finalize, reason = should_finalize_folder(ts_dir, all_folders, folder_states)
-    
-    if should_finalize:
-        # 直播已结束 - 最终检查
-        print(f"发现已结束的直播：{base_name} ({reason})，进行最终检查...")
-        success = finalize_live_check(
+    # 直播进行中 - 增量检查稳定的文件
+    if current_time - state['last_check'] >= LIVE_CHECK_INTERVAL:
+        if VERBOSE_LOGGING:
+            print(f"处理中：{base_name}，进行增量检查...")
+        check_live_folder_incremental(
             ts_dir, 
             state['checked_files'], 
             state['valid_files'], 
             state['error_logs']
         )
-        return success  # 返回最终检查结果
+        state['last_check'] = current_time
     else:
-        # 直播进行中或等待中 - 增量检查稳定的文件
-        if current_time - state['last_check'] >= LIVE_CHECK_INTERVAL:
-            if VERBOSE_LOGGING:
-                print(f"处理中：{base_name} ({reason})，进行增量检查...")
-            check_live_folder_incremental(
-                ts_dir, 
-                state['checked_files'], 
-                state['valid_files'], 
-                state['error_logs']
-            )
-            state['last_check'] = current_time
-        else:
-            if DEBUG_MODE:
-                remaining = LIVE_CHECK_INTERVAL - (current_time - state['last_check'])
-                print(f"文件夹 {base_name} 等待 {remaining:.0f} 秒后进行下次检查 ({reason})")
-        return False  # 直播还在进行中或等待中
+        if DEBUG_MODE:
+            remaining = LIVE_CHECK_INTERVAL - (current_time - state['last_check'])
+            print(f"文件夹 {base_name} 等待 {remaining:.0f} 秒后进行下次检查")
+    
+    return False  # 直播还在进行中，文件夹未完成
 
 def cleanup_old_folder_states(folder_states: dict, active_folders: list, current_time: float):
     """清理过期的文件夹状态，释放内存"""
@@ -347,6 +264,9 @@ def cleanup_old_folder_states(folder_states: dict, active_folders: list, current
         # 如果文件夹不在活动列表中，且状态保留时间超过配置的延迟
         if (folder_path not in active_folders and 
             current_time - state.get('last_check', 0) > FOLDER_CLEANUP_DELAY):
+            folders_to_remove.append(folder_path)
+        # 新增：如果文件夹已经有filelist.txt，强制清理
+        elif has_been_merged(folder_path):
             folders_to_remove.append(folder_path)
     
     for folder_path in folders_to_remove:
@@ -359,19 +279,21 @@ def main_loop():
     print("开始监控直播文件夹...")
     
     # 用于跟踪每个文件夹的检查状态
-    folder_states = {}  # {folder_path: {'checked_files': set, 'valid_files': list, 'error_logs': list, 'last_check': time, 'last_activity_time': time}}
+    folder_states = {}
+    merge_called = False  # 防止重复调用merge
     
     while True:
         current_time = time.time()
         
+        # 首先检查直播状态
+        is_streaming, _ = is_live("Haruna_Hashimoto")
+        
         # 获取直播文件夹
         if PROCESS_ALL_FOLDERS:
             all_folders = find_all_live_folders(PARENT_DIR)
-            # 限制同时处理的文件夹数量
             if len(all_folders) > MAX_CONCURRENT_FOLDERS:
                 all_folders = all_folders[-MAX_CONCURRENT_FOLDERS:]
         else:
-            # 只处理最新的文件夹（保持向后兼容）
             latest_folder = find_latest_live_folder(PARENT_DIR)
             all_folders = [latest_folder] if latest_folder else []
         
@@ -381,36 +303,65 @@ def main_loop():
             time.sleep(CHECK_INTERVAL)
             continue
         
-        if VERBOSE_LOGGING:
-            print(f"发现 {len(all_folders)} 个文件夹")
+        # 根据直播状态决定处理方式
+        if is_streaming:
+            print(f"检测到直播中，开始处理 {len(all_folders)} 个文件夹")
+            merge_called = False  # 重置合并标志
+            
+            # 处理每个文件夹（原有逻辑）
+            completed_folders = []
+            active_folders = 0
+            waiting_folders = 0
+            
+            for ts_dir in all_folders:
+                try:
+                    result = process_single_folder(ts_dir, folder_states, all_folders, current_time)
+                    if result is True:
+                        completed_folders.append(ts_dir)
+                    elif result is False:
+                        if is_live_active(ts_dir):  # 保留原有的文件活跃检查作为辅助
+                            active_folders += 1
+                        else:
+                            waiting_folders += 1
+                except Exception as e:
+                    print(f"处理文件夹 {ts_dir.name} 时出错: {e}")
+                    continue
+            
+            if VERBOSE_LOGGING and (active_folders > 0 or waiting_folders > 0 or completed_folders):
+                print(f"状态摘要: {active_folders} 个活动, {waiting_folders} 个等待结束, {len(completed_folders)} 个已完成")
         
-        # 处理每个文件夹
-        completed_folders = []
-        active_folders = 0
-        waiting_folders = 0
+        else:
+            print("直播已结束，检查文件夹完成状态...")
+            
+            # 直播结束时，对所有文件夹进行最终检查
+            for ts_dir in all_folders:
+                if not has_been_merged(ts_dir) and has_files_to_check(ts_dir):
+                    print(f"对已结束的直播进行最终检查: {ts_dir.name}")
+                    if ts_dir not in folder_states:
+                        folder_states[ts_dir] = {
+                            'checked_files': set(),
+                            'valid_files': [],
+                            'error_logs': [],
+                            'last_check': 0,
+                            'last_activity_time': 0,
+                            'creation_time': current_time
+                        }
+                    
+                    finalize_live_check(
+                        ts_dir,
+                        folder_states[ts_dir]['checked_files'],
+                        folder_states[ts_dir]['valid_files'],
+                        folder_states[ts_dir]['error_logs']
+                    )
+            
+            # 检查是否所有文件夹都已完成
+            if all_folders_completed(all_folders) and not merge_called:
+                print("所有文件夹检查完成，开始合并...")
+                merge_once()
+                merge_called = True  # 标记已调用合并，避免重复
         
-        for ts_dir in all_folders:
-            try:
-                result = process_single_folder(ts_dir, folder_states, all_folders, current_time)
-                if result is True:
-                    # 文件夹已完成，标记为待清理
-                    completed_folders.append(ts_dir)
-                elif result is False:
-                    # 文件夹仍在处理中或等待中
-                    if is_live_active(ts_dir):
-                        active_folders += 1
-                    else:
-                        waiting_folders += 1
-            except Exception as e:
-                print(f"处理文件夹 {ts_dir.name} 时出错: {e}")
-                continue
-        
-        # 清理已完成的文件夹状态（延迟清理）
+        # 清理过期状态
         cleanup_old_folder_states(folder_states, all_folders, current_time)
-        
-        # 显示状态摘要
-        if VERBOSE_LOGGING and (active_folders > 0 or waiting_folders > 0 or completed_folders):
-            print(f"状态摘要: {active_folders} 个活动, {waiting_folders} 个等待结束, {len(completed_folders)} 个已完成")
         
         time.sleep(CHECK_INTERVAL)
 

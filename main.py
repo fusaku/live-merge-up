@@ -142,7 +142,6 @@ def print_config():
     print(f"  输出目录: {OUTPUT_DIR}")
     print(f"  检查间隔: {CHECK_INTERVAL}秒")
     print(f"  直播中检查间隔: {LIVE_CHECK_INTERVAL}秒")
-    print(f"  合并检查间隔: {MERGE_CHECK_INTERVAL}秒")
     print(f"  并发线程数: {MAX_WORKERS}")
     print(f"  自动上传: {'启用' if ENABLE_AUTO_UPLOAD else '禁用'}")
     print(f"  调试模式: {'启用' if DEBUG_MODE else '禁用'}")

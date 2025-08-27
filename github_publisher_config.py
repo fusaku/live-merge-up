@@ -44,7 +44,7 @@ GIT_PULL_BEFORE_PUSH = True
 # ==================== 字幕文件配置 ====================
 
 # 支持的字幕文件扩展名
-SUBTITLE_EXTENSIONS = ['.ass', '.srt', '.vtt', '.ssa', '.sub']
+SUBTITLE_EXTENSIONS = ['.ass']
 
 # 日期格式（用于从文件名提取日期）
 DATE_FORMAT_IN_FILENAME = "%y%m%d"
