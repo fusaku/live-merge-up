@@ -16,8 +16,8 @@ from typing import List, Dict, Optional, Tuple
 try:
     from github_publisher_config import *
 except ImportError as e:
-    print(f"无法导入配置文件: {e}")
-    print("请确保github_publisher_config.py文件存在")
+    log(f"无法导入配置文件: {e}")
+    log("请确保github_publisher_config.py文件存在")
     raise
 # ==================== 验证配置 ====================
 
@@ -37,9 +37,9 @@ def validate_config():
         errors.append(f"指定路径不是Git仓库: {GITHUB_PAGES_REPO_PATH}")
     
     if errors:
-        print("配置验证失败:")
+        log("配置验证失败:")
         for error in errors:
-            print(f"  - {error}")
+            log(f"  - {error}")
         return False
     
     return True
@@ -48,7 +48,7 @@ def ensure_directories():
     """确保必要的目录存在"""
     SUBTITLES_TARGET_DIR.mkdir(parents=True, exist_ok=True)
     if VERBOSE_LOGGING:
-        print(f"确保目录存在: {SUBTITLES_TARGET_DIR}")
+        log(f"确保目录存在: {SUBTITLES_TARGET_DIR}")
 
 class GitHubPagesPublisher:
     """GitHub Pages视频发布器"""
@@ -70,8 +70,8 @@ class GitHubPagesPublisher:
     def log(self, message: str, level: str = "INFO"):
         """日志输出"""
         if VERBOSE_LOGGING or level in ["ERROR", "WARNING"]:
-            timestamp = datetime.now().strftime("%H:%M:%S")
-            print(f"[{timestamp}] {message}")
+            timestamp = datetime.now().strftime('%m-%d %H:%M:%S')
+            print(f"[{timestamp} - {__file__.split('/')[-1]}] {message}")
     
     def extract_date_from_filename(self, filename: str) -> Optional[str]:
         """从文件名提取日期 (例如: 250808 -> 2025-08-08)"""
@@ -455,7 +455,7 @@ def publish_to_github_pages():
         return success
         
     except Exception as e:
-        print(f"GitHub Pages发布失败: {e}")
+        log(f"GitHub Pages发布失败: {e}")
         return False
 
 
@@ -463,9 +463,9 @@ def main():
     """主函数 - 独立运行接口"""
     success = publish_to_github_pages()
     if success:
-        print("发布任务完成！")
+        log("发布任务完成！")
     else:
-        print("发布任务失败！")
+        log("发布任务失败！")
         exit(1)
 
 

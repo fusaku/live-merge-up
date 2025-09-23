@@ -12,6 +12,8 @@ TS_PARENT_DIR = Path("~/Downloads/Showroom/active").expanduser()
 SERVICE_NAME = "showroom-hashimoto-haruna.service"  # 录制服务名
 LOG_DIR = Path("~/logs").expanduser()
 LOG_DIR.mkdir(exist_ok=True)
+TEMP_DIR = Path("/home/ubuntu/temp")
+TEMP_DIR.mkdir(exist_ok=True)
 
 # ==== 设置日志 ====
 def setup_logger():
@@ -36,6 +38,21 @@ def is_live(room_id):
         data = res.json()
         is_live_flag = data.get("is_live", False)
         started_at = data.get("started_at") if is_live_flag else None
+        
+        # === 保存到 /home/ubuntu/temp/is_live.txt ===
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        content = f"{now_str} | is_live={is_live_flag}\n"
+
+        temp_file = TEMP_DIR / "is_live.tmp"
+        final_file = TEMP_DIR / "is_live.txt"
+
+        # 先写入临时文件
+        with open(temp_file, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        # 原子替换，避免读写冲突
+        os.replace(temp_file, final_file)
+
         return is_live_flag, started_at
     except Exception as e:
         logging.error(f"获取直播状态失败: {e}")

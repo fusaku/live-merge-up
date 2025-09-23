@@ -1,27 +1,38 @@
 from pathlib import Path
+import inspect
+from datetime import datetime
+
+def log(msg):
+    frame = inspect.currentframe().f_back
+    filename = frame.f_globals['__file__'].split('/')[-1]
+    print(f"[{datetime.now().strftime('%m-%d %H:%M:%S')} - {filename}] {msg}")
 
 # ========================= 路径配置 =========================
 PARENT_DIR = Path("~/Downloads/Showroom/active").expanduser()  # 所有直播文件夹所在目录
 OUTPUT_DIR = Path("~/Videos/merged").expanduser()  # 输出合并视频和日志的目录
 
 # ========================= 检查配置 =========================
-CHECK_INTERVAL = 90  # 每次检测间隔秒数
-LIVE_INACTIVE_THRESHOLD = 90  # 判定直播结束的空闲秒数
+CHECK_INTERVAL = 30  # 每次检测间隔秒数
+LIVE_INACTIVE_THRESHOLD = 60  # 判定直播结束的空闲秒数
 MAX_WORKERS = 1  # 并发线程数
 LIVE_CHECK_INTERVAL = 60  # 直播中检查文件的间隔秒数
 MIN_FILES_FOR_CHECK = 5  # 开始检查的最小文件数量
 FILE_STABLE_TIME = 5  # 文件稳定时间（秒），超过这个时间没修改的文件才检查
+FINAL_INACTIVE_THRESHOLD = 60  # 1分钟文件无活动才确认结束（秒）
 
 # ========================= 多文件夹处理配置 =========================
 PROCESS_ALL_FOLDERS = True  # 是否处理所有文件夹（True）还是只处理最新的（False）
-MAX_CONCURRENT_FOLDERS = 5  # 最大同时处理的文件夹数量（防止内存占用过多）
-FOLDER_CLEANUP_DELAY = 60  # 完成的文件夹状态保留时间（秒），防止重复处理
+MAX_CONCURRENT_FOLDERS = 10  # 最大同时处理的文件夹数量（防止内存占用过多）
+FOLDER_CLEANUP_DELAY = 120  # 完成的文件夹状态保留时间（秒），防止重复处理
 
 # ========================= 字幕合并配置 =========================
 SUBTITLE_ROOT = Path("/home/ubuntu/Downloads/Showroom").expanduser() # 字幕文件根目录
 SUBTITLE_SUBPATH = "AKB48/comments"  # 日期目录下的子路径
-ENABLE_SUBTITLE_BASED_MERGE = True  # 是否启用基于字幕的智能合并
 TEMP_MERGED_DIR = PARENT_DIR / "temp_merged"  # 临时合并文件目录
+
+# ==================== 字幕文件配置 ====================
+# 日期格式（用于从文件名提取日期）
+DATE_FORMAT_IN_FILENAME = "%y%m%d"
 
 # ========================= 文件名配置 =========================
 FILELIST_NAME = "filelist.txt"  # 文件列表文件名

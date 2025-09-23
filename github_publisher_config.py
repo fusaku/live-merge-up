@@ -1,8 +1,14 @@
 """
 GitHub Pages发布器配置文件
 """
+import inspect
+from datetime import datetime
 from pathlib import Path
-import os
+
+def log(msg):
+    frame = inspect.currentframe().f_back
+    filename = frame.f_globals['__file__'].split('/')[-1]
+    print(f"[{datetime.now().strftime('%m-%d %H:%M:%S')} - {filename}] {msg}")
 
 # ==================== 路径配置 ====================
 

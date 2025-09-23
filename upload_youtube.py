@@ -1,20 +1,19 @@
 import pickle
 import time
-from datetime import datetime, timedelta
-from pathlib import Path
-from zoneinfo import ZoneInfo
 import fcntl
 import os
 import shutil
 import json
 
+from datetime import datetime, timedelta
+from pathlib import Path
+from zoneinfo import ZoneInfo
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 from github_pages_publisher import publish_to_github_pages
-
 from config import *
 
 # 全局变量
@@ -79,7 +78,7 @@ def convert_title_to_japanese(title: str) -> str:
         converted_title = converted_title.replace(en_name, jp_name)
     
     if DEBUG_MODE and converted_title != title:
-        print(f"标题转换: {title} -> {converted_title}")
+        log(f"标题转换: {title} -> {converted_title}")
     
     return converted_title
 
@@ -119,7 +118,7 @@ def get_authenticated_service():
                 creds = pickle.load(token_file)
         except Exception as e:
             if DEBUG_MODE:
-                print(f"加载token失败: {e}")
+                log(f"加载token失败: {e}")
             creds = None
 
     # 检查凭据是否有效
@@ -129,7 +128,7 @@ def get_authenticated_service():
                 creds.refresh(Request())
             except Exception as e:
                 if DEBUG_MODE:
-                    print(f"刷新token失败: {e}")
+                    log(f"刷新token失败: {e}")
                 creds = None
         
         # 如果凭据无效，重新认证
@@ -148,7 +147,7 @@ def get_authenticated_service():
                 pickle.dump(creds, token_file)
         except Exception as e:
             if DEBUG_MODE:
-                print(f"保存token失败: {e}")
+                log(f"保存token失败: {e}")
 
     return build("youtube", "v3", credentials=creds)
 
@@ -171,9 +170,9 @@ def handle_post_upload_actions(file_path: Path):
         try:
             file_path.unlink()
             if VERBOSE_LOGGING:
-                print(f"已删除本地文件: {file_path.name}")
+                log(f"已删除本地文件: {file_path.name}")
         except Exception as e:
-            print(f"删除文件失败: {e}")
+            log(f"删除文件失败: {e}")
     
     elif YOUTUBE_MOVE_AFTER_UPLOAD:
         try:
@@ -188,9 +187,9 @@ def handle_post_upload_actions(file_path: Path):
             
             shutil.move(str(file_path), str(backup_path))
             if VERBOSE_LOGGING:
-                print(f"已移动文件到备份目录: {backup_path.name}")
+                log(f"已移动文件到备份目录: {backup_path.name}")
         except Exception as e:
-            print(f"移动文件失败: {e}")
+            log(f"移动文件失败: {e}")
 
 def send_upload_notification(file_name: str, video_id: str, success: bool = True):
     """发送上传完成通知"""
@@ -210,10 +209,10 @@ def send_upload_notification(file_name: str, video_id: str, success: bool = True
         
         requests.post(YOUTUBE_NOTIFICATION_WEBHOOK_URL, json=payload, timeout=10)
         if VERBOSE_LOGGING:
-            print(f"已发送通知: {file_name}")
+            log(f"已发送通知: {file_name}")
     except Exception as e:
         if DEBUG_MODE:
-            print(f"发送通知失败: {e}")
+            log(f"发送通知失败: {e}")
 
 def add_video_to_playlist(youtube, video_id: str, playlist_id: str):
     """将视频添加到播放列表"""
@@ -232,10 +231,10 @@ def add_video_to_playlist(youtube, video_id: str, playlist_id: str):
         )
         response = request.execute()
         if VERBOSE_LOGGING:
-            print(f"已添加视频 {video_id} 到播放列表 {playlist_id}")
+            log(f"已添加视频 {video_id} 到播放列表 {playlist_id}")
         return True
     except HttpError as e:
-        print(f"添加到播放列表失败: {e}")
+        log(f"添加到播放列表失败: {e}")
         return False
 
 def upload_video(
@@ -262,13 +261,13 @@ def upload_video(
     """
     file_path_obj = Path(file_path)
     if not file_path_obj.exists():
-        print(f"文件不存在: {file_path}")
+        log(f"文件不存在: {file_path}")
         return None
     
     try:
         youtube = get_authenticated_service()
     except Exception as e:
-        print(f"获取YouTube服务失败: {e}")
+        log(f"获取YouTube服务失败: {e}")
         return None
     
     # 使用配置的默认值和文件名处理标题
@@ -317,41 +316,41 @@ def upload_video(
             media_body=media
         )
     except Exception as e:
-        print(f"创建上传请求失败: {e}")
+        log(f"创建上传请求失败: {e}")
         return None
 
     # 执行上传
     response = None
     try:
-        print(f"开始上传: {file_path_obj.name}")
-        print(f"视频标题: {title}")
+        log(f"开始上传: {file_path_obj.name}")
+        log(f"视频标题: {title}")
         while response is None:
             status, response = request.next_chunk()
             if status:
                 progress = int(status.progress() * 100)
-                print(f"上传进度: {progress}%")
+                log(f"上传进度: {progress}%")
                 
     except HttpError as e:
         if e.resp.status == 403 and 'quotaExceeded' in str(e):
-            print("上传配额已用尽")
+            log("上传配额已用尽")
             raise  # 重新抛出配额错误
         else:
-            print(f"上传失败: {e}")
+            log(f"上传失败: {e}")
             return None
     except Exception as e:
-        print(f"上传过程中出现错误: {e}")
+        log(f"上传过程中出现错误: {e}")
         return None
 
     if not response:
-        print("上传失败：未收到响应")
+        log("上传失败：未收到响应")
         return None
 
     video_id = response.get("id")
     if not video_id:
-        print("上传失败：未获取到视频ID")
+        log("上传失败：未获取到视频ID")
         return None
     
-    print(f"上传完成，视频ID: {video_id}")
+    log(f"上传完成，视频ID: {video_id}")
 
     # 添加到播放列表
     if playlist_id:
@@ -371,7 +370,7 @@ def handle_merged_video(mp4_path: Path) -> bool:
     """
     if is_uploaded(mp4_path):
         if VERBOSE_LOGGING:
-            print(f"{mp4_path.name} 已上传，跳过")
+            log(f"{mp4_path.name} 已上传，跳过")
         return True
 
     # 从文件名生成标题，并应用日文转换
@@ -388,20 +387,20 @@ def handle_merged_video(mp4_path: Path) -> bool:
         video_id = upload_video(str(mp4_path), title=title, description=description, tags=tags)
     except HttpError as e:
         if e.resp.status == 403 and 'quotaExceeded' in str(e):
-            print("检测到上传配额用尽，暂停上传，等待配额重置后继续。")
+            log("检测到上传配额用尽，暂停上传，等待配额重置后继续。")
             return False
         else:
-            print(f"上传时发生HTTP错误: {e}")
+            log(f"上传时发生HTTP错误: {e}")
             send_upload_notification(mp4_path.name, "", False)
             return False
     except Exception as e:
-        print(f"上传时发生未知错误: {e}")
+        log(f"上传时发生未知错误: {e}")
         send_upload_notification(mp4_path.name, "", False)
         return False
 
     if video_id:
         mark_as_uploaded(mp4_path, video_id)
-        print(f"{mp4_path.name} 上传成功并已标记")
+        log(f"{mp4_path.name} 上传成功并已标记")
         
         # 发送成功通知
         send_upload_notification(mp4_path.name, video_id, True)
@@ -414,7 +413,7 @@ def handle_merged_video(mp4_path: Path) -> bool:
         
         return True
     else:
-        print(f"{mp4_path.name} 上传失败")
+        log(f"{mp4_path.name} 上传失败")
         send_upload_notification(mp4_path.name, "", False)
         return False
 
@@ -427,7 +426,7 @@ def upload_all_pending_videos(directory: Path = None):
     """
     if not ENABLE_AUTO_UPLOAD:
         if DEBUG_MODE:
-            print("自动上传功能已禁用")
+            log("自动上传功能已禁用")
         return
     
     if directory is None:
@@ -441,7 +440,7 @@ def upload_all_pending_videos(directory: Path = None):
     with FileLock(upload_lock_file, UPLOAD_LOCK_TIMEOUT) as lock:
         if lock is None:
             if VERBOSE_LOGGING:
-                print("其他进程正在上传，跳过本次上传")
+                log("其他进程正在上传，跳过本次上传")
             return
         
         _upload_all_pending_videos_internal(directory)
@@ -456,24 +455,24 @@ def _upload_all_pending_videos_internal(directory: Path):
     # 检查今天是否已经配额用尽
     if YOUTUBE_ENABLE_QUOTA_MANAGEMENT and LAST_QUOTA_EXHAUSTED_DATE == today_str:
         if VERBOSE_LOGGING:
-            print(f"检测到上传配额在 {today_str} 已用尽，将在日本时间 {retry_time} 后重试。")
+            log(f"检测到上传配额在 {today_str} 已用尽，将在日本时间 {retry_time} 后重试。")
         return
 
     if not directory.exists():
-        print(f"目录不存在: {directory}")
+        log(f"目录不存在: {directory}")
         return
 
     if VERBOSE_LOGGING:
-        print(f"扫描目录: {directory}")
+        log(f"扫描目录: {directory}")
 
     # 查找所有MP4文件
     mp4_files = sorted(directory.glob("*.mp4"))
     if VERBOSE_LOGGING:
-        print(f"找到 {len(mp4_files)} 个 MP4 文件")
+        log(f"找到 {len(mp4_files)} 个 MP4 文件")
     
     if not mp4_files:
         if VERBOSE_LOGGING:
-            print("没有找到MP4文件")
+            log("没有找到MP4文件")
         return
 
     # 过滤出未上传的文件
@@ -481,29 +480,29 @@ def _upload_all_pending_videos_internal(directory: Path):
     for mp4_file in mp4_files:
         if is_uploaded(mp4_file):
             if VERBOSE_LOGGING:
-                print(f"跳过（已上传）: {mp4_file.name}")
+                log(f"跳过（已上传）: {mp4_file.name}")
         else:
             if VERBOSE_LOGGING:
-                print(f"待上传: {mp4_file.name}")
+                log(f"待上传: {mp4_file.name}")
             pending_files.append(mp4_file)
 
     if not pending_files:
         if VERBOSE_LOGGING:
-            print("没有未上传的视频")
+            log("没有未上传的视频")
         return
 
-    print(f"开始上传 {len(pending_files)} 个未上传的视频")
+    log(f"开始上传 {len(pending_files)} 个未上传的视频")
     
     # 逐个上传文件
     for mp4_file in pending_files:
         if VERBOSE_LOGGING:
-            print(f"\n处理文件: {mp4_file.name}")
+            log(f"\n处理文件: {mp4_file.name}")
         
         success = handle_merged_video(mp4_file)
         
         if not success:
             if YOUTUBE_ENABLE_QUOTA_MANAGEMENT:
-                print(f"上传配额耗尽，将在日本时间 {retry_time} 后重试")
+                log(f"上传配额耗尽，将在日本时间 {retry_time} 后重试")
                 LAST_QUOTA_EXHAUSTED_DATE = today_str
             break
             
@@ -511,7 +510,7 @@ def _upload_all_pending_videos_internal(directory: Path):
         if len(pending_files) > 1:
             time.sleep(5)
     
-    print("上传任务完成")
+    log("上传任务完成")
 
 def save_upload_info(file_path: Path, video_id: str, title: str, description: str, tags: list, upload_time: str):
     """保存上传信息到JSON文件"""
@@ -549,10 +548,10 @@ def save_upload_info(file_path: Path, video_id: str, title: str, description: st
         with open(upload_info_file, 'w', encoding='utf-8') as f:
             json.dump(upload_data, f, ensure_ascii=False, indent=2)
         if VERBOSE_LOGGING:
-            print(f"上传信息已保存到: {upload_info_file}")
+            log(f"上传信息已保存到: {upload_info_file}")
             publish_to_github_pages()
     except Exception as e:
-        print(f"保存上传信息失败: {e}")
+        log(f"保存上传信息失败: {e}")
 
 def main():
     """主函数，用于测试"""

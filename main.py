@@ -15,40 +15,38 @@ import argparse
 import sys
 import threading
 import time
-from pathlib import Path
-
 from config import *
 
 def run_checker():
     """运行检查功能"""
     try:
         from checker import main_loop as checker_main
-        print("启动检查模块...")
+        log("启动检查模块...")
         checker_main()
     except KeyboardInterrupt:
-        print("检查模块已停止")
+        log("检查模块已停止")
     except Exception as e:
-        print(f"检查模块发生错误: {e}")
+        log(f"检查模块发生错误: {e}")
 
 def run_merger():
     """运行合并功能"""
     try:
-        from merger import main_loop as merger_main
-        print("启动合并模块...")
+        from merger import merge_once as merger_main
+        log("启动合并模块...")
         merger_main()
     except KeyboardInterrupt:
-        print("合并模块已停止")
+        log("合并模块已停止")
     except Exception as e:
-        print(f"合并模块发生错误: {e}")
+        log(f"合并模块发生错误: {e}")
 
 def run_merger_once():
     """执行一次合并检查"""
     try:
         from merger import merge_once
-        print("执行一次合并检查...")
+        log("执行一次合并检查...")
         merge_once()
     except Exception as e:
-        print(f"合并模块发生错误: {e}")
+        log(f"合并模块发生错误: {e}")
 
 def check_dependencies():
     """检查依赖项"""
@@ -84,10 +82,10 @@ def check_dependencies():
             try:
                 __import__(module)
             except ImportError:
-                print(f"警告: 上传模块 {module} 不可用，将禁用自动上传功能")
+                log(f"警告: 上传模块 {module} 不可用，将禁用自动上传功能")
     
     if missing_modules:
-        print(f"错误: 缺少必需的模块: {', '.join(missing_modules)}")
+        log(f"错误: 缺少必需的模块: {', '.join(missing_modules)}")
         return False
     
     return True
@@ -101,12 +99,12 @@ def check_directories():
     
     for directory, description in directories_to_check:
         if not directory.exists():
-            print(f"警告: {description} 不存在: {directory}")
+            log(f"警告: {description} 不存在: {directory}")
             try:
                 directory.mkdir(parents=True, exist_ok=True)
-                print(f"已创建目录: {directory}")
+                log(f"已创建目录: {directory}")
             except Exception as e:
-                print(f"无法创建目录 {directory}: {e}")
+                log(f"无法创建目录 {directory}: {e}")
                 return False
     
     return True
@@ -128,24 +126,24 @@ def check_external_tools():
             missing_tools.append(tool)
     
     if missing_tools:
-        print(f"错误: 缺少必需的工具: {', '.join(missing_tools)}")
-        print("请安装 FFmpeg 工具包")
+        log(f"错误: 缺少必需的工具: {', '.join(missing_tools)}")
+        log("请安装 FFmpeg 工具包")
         return False
     
     return True
 
 def print_config():
     """打印当前配置"""
-    print("=" * 50)
-    print("当前配置:")
-    print(f"  直播文件夹: {PARENT_DIR}")
-    print(f"  输出目录: {OUTPUT_DIR}")
-    print(f"  检查间隔: {CHECK_INTERVAL}秒")
-    print(f"  直播中检查间隔: {LIVE_CHECK_INTERVAL}秒")
-    print(f"  并发线程数: {MAX_WORKERS}")
-    print(f"  自动上传: {'启用' if ENABLE_AUTO_UPLOAD else '禁用'}")
-    print(f"  调试模式: {'启用' if DEBUG_MODE else '禁用'}")
-    print("=" * 50)
+    log("=" * 50)
+    log("当前配置:")
+    log(f"  直播文件夹: {PARENT_DIR}")
+    log(f"  输出目录: {OUTPUT_DIR}")
+    log(f"  检查间隔: {CHECK_INTERVAL}秒")
+    log(f"  直播中检查间隔: {LIVE_CHECK_INTERVAL}秒")
+    log(f"  并发线程数: {MAX_WORKERS}")
+    log(f"  自动上传: {'启用' if ENABLE_AUTO_UPLOAD else '禁用'}")
+    log(f"  调试模式: {'启用' if DEBUG_MODE else '禁用'}")
+    log("=" * 50)
 
 def main():
     parser = argparse.ArgumentParser(
@@ -186,14 +184,14 @@ def main():
     # 检查冲突的参数
     exclusive_args = [args.check_only, args.merge_only, args.merge_once]
     if sum(exclusive_args) > 1:
-        print("错误: --check-only, --merge-only, --merge-once 不能同时使用")
+        log("错误: --check-only, --merge-only, --merge-once 不能同时使用")
         sys.exit(1)
     
-    print("直播视频处理系统启动")
+    log("直播视频处理系统启动")
     
     # 配置和依赖检查
     if not args.no_config_check:
-        print("检查系统环境...")
+        log("检查系统环境...")
         
         if not check_dependencies():
             sys.exit(1)
@@ -204,7 +202,7 @@ def main():
         if not check_external_tools():
             sys.exit(1)
         
-        print("系统环境检查通过")
+        log("系统环境检查通过")
     
     print_config()
     
@@ -220,7 +218,7 @@ def main():
             run_merger_once()
         else:
             # 同时运行检查和合并
-            print("启动多线程模式...")
+            log("启动多线程模式...")
             
             checker_thread = threading.Thread(target=run_checker, name="Checker")
             merger_thread = threading.Thread(target=run_merger, name="Merger")
@@ -231,19 +229,19 @@ def main():
             checker_thread.start()
             merger_thread.start()
             
-            print("检查和合并模块已启动")
-            print("按 Ctrl+C 停止程序")
+            log("检查和合并模块已启动")
+            log("按 Ctrl+C 停止程序")
             
             try:
                 while True:
                     time.sleep(1)
             except KeyboardInterrupt:
-                print("\n正在停止程序...")
+                log("\n正在停止程序...")
                 
     except KeyboardInterrupt:
-        print("\n程序已停止")
+        log("\n程序已停止")
     except Exception as e:
-        print(f"程序发生错误: {e}")
+        log(f"程序发生错误: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ try:
     UPLOAD_AVAILABLE = True
 except ImportError:
     UPLOAD_AVAILABLE = False
-    print("上传模块不可用，跳过自动上传功能")
+    log("上传模块不可用，跳过自动上传功能")
 
 class FileLock:
     """文件锁类，防止多个进程同时处理同一个文件"""
@@ -122,28 +122,28 @@ def merge_item(item: dict) -> bool:
     lock_file = LOCK_DIR / f"{name}.merge.lock"
     
     if not filelist_txt.exists():
-        print(f"{name} 没有 {FILELIST_NAME}，跳过合并")
+        log(f"{name} 没有 {FILELIST_NAME}，跳过合并")
         return False
 
     if output_file.exists():
-        print(f"跳过已合并：{name}")
+        log(f"跳过已合并：{name}")
         return True
 
     # 使用文件锁防止重复合并
     with FileLock(lock_file, MERGE_LOCK_TIMEOUT) as lock:
         if lock is None:
-            print(f"{name} 正在被其他进程合并，跳过")
+            log(f"{name} 正在被其他进程合并，跳过")
             return False
         
         # 再次检查文件是否存在（双重检查）
         if output_file.exists():
-            print(f"跳过已合并：{name}")
+            log(f"跳过已合并：{name}")
             return True
         
         # 确保输出目录存在
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-        print(f"开始合并 {name} -> {output_file}")
+        log(f"开始合并 {name} -> {output_file}")
         
         # 构建 FFmpeg 命令
         ffmpeg_cmd = ["ffmpeg"]
@@ -160,7 +160,7 @@ def merge_item(item: dict) -> bool:
         result = subprocess.run(ffmpeg_cmd)
 
         if result.returncode == 0:
-            print(f"{name} 合并完成")
+            log(f"{name} 合并完成")
             # 新增：为所有被合并的文件夹创建标记文件
             if item['type'] == 'merged':
                 for folder in item['folders']:
@@ -168,7 +168,7 @@ def merge_item(item: dict) -> bool:
                     marker_file.write_text(f"已合并到: {name}\n时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
             return True
         else:
-            print(f"{name} 合并失败，请检查 ffmpeg 日志")
+            log(f"{name} 合并失败，请检查 ffmpeg 日志")
             return False
 
 def merge_all_ready():
@@ -176,26 +176,26 @@ def merge_all_ready():
     ready_items = find_ready_folders(PARENT_DIR)
     
     if not ready_items:
-        print("没有找到待合并的文件夹")
+        log("没有找到待合并的文件夹")
         return 0
     
-    print(f"找到 {len(ready_items)} 个待合并的文件夹")
+    log(f"找到 {len(ready_items)} 个待合并的文件夹")
     
     success_count = 0
     for folder in ready_items:
         if merge_item(folder):
             success_count += 1
 
-    print(f"成功合并 {success_count} 个视频")
+    log(f"成功合并 {success_count} 个视频")
     return success_count
 
 def upload_if_needed(success_count):
     if success_count > 0:
         if ENABLE_AUTO_UPLOAD and UPLOAD_AVAILABLE:
-            print("检测是否有已经合并,还未上传的视频")
-            #upload_all_pending_videos(OUTPUT_DIR)
+            log("检测是否有已经合并,还未上传的视频")
+            upload_all_pending_videos(OUTPUT_DIR)
         elif ENABLE_AUTO_UPLOAD and not UPLOAD_AVAILABLE:
-            print("自动上传已启用但上传模块不可用")
+            log("自动上传已启用但上传模块不可用")
 
 def merge_once():
     """执行一次合并检查（用于脚本调用）"""
