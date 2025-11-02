@@ -107,21 +107,63 @@ def has_matching_subtitle_file(ts_dir: Path):
         if exact_subtitle.exists():
             return True
         
-        # 如果精确匹配失败，查找同一天的其他字幕文件
-        if subtitle_dir.exists():
-            subtitle_files = list(subtitle_dir.glob(f"{date_part} Showroom*.ass"))
+        # 如果精确匹配失败,提取人名进行模糊匹配
+        # 从文件夹名称中提取人名部分
+        # 格式: "日期 Showroom - 团队信息 人名 时间戳"
+        try:
+            # 分割文件夹名,提取关键部分
+            parts = folder_name.split(" - ")
+            if len(parts) >= 2:
+                # parts[1] 应该是 "AKB48 Team 8 Hashimoto Haruna 064348"
+                name_parts = parts[1].split()
+                
+                # 查找人名:通常是最后两个单词(姓氏 名字),但要排除时间戳
+                # 时间戳格式是6位数字
+                filtered_parts = [p for p in name_parts if not (p.isdigit() and len(p) == 6)]
+                
+                # 如果有足够的部分,取最后两个作为人名
+                if len(filtered_parts) >= 2:
+                    # 姓氏和名字
+                    last_name = filtered_parts[-2]
+                    first_name = filtered_parts[-1]
+                    name_pattern = f"{last_name} {first_name}"
+                else:
+                    name_pattern = None
+            else:
+                name_pattern = None
+                
+        except Exception as e:
+            if DEBUG_MODE:
+                log(f"解析人名失败: {folder_name}, 错误: {e}")
+            name_pattern = None
+        
+        # 如果成功提取人名,在同一天的字幕文件中查找包含该人名的文件
+        if name_pattern and subtitle_dir.exists():
+            # 先尝试精确匹配人名
+            subtitle_files = list(subtitle_dir.glob(f"{date_part} Showroom*{name_pattern}*.ass"))
+            
+            # 如果没找到,尝试只用姓氏匹配
+            if not subtitle_files and len(filtered_parts) >= 2:
+                last_name = filtered_parts[-2]
+                subtitle_files = list(subtitle_dir.glob(f"{date_part} Showroom*{last_name}*.ass"))
+            
             if subtitle_files:
-                # 找到同一天的字幕文件，自动创建软链接
+                # 找到匹配的字幕文件,自动创建软链接
                 source_subtitle = subtitle_files[0]  # 取第一个匹配的
                 log(f"检测到字幕文件不匹配情况:")
                 log(f"  视频文件夹: {folder_name}")
                 log(f"  字幕文件: {source_subtitle.name}")
+                log(f"  匹配模式: {name_pattern}")
                 log(f"  自动创建匹配的字幕文件...")
                 
                 try:
                     # 创建软链接
                     exact_subtitle.symlink_to(source_subtitle)
                     log(f"✓ 成功创建软链接: {exact_subtitle.name}")
+                    return True
+                except FileExistsError:
+                    # 软链接已存在,直接返回True
+                    log(f"✓ 软链接已存在: {exact_subtitle.name}")
                     return True
                 except Exception as e:
                     log(f"✗ 创建软链接失败: {e}")

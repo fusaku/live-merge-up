@@ -2,6 +2,8 @@ import time
 import subprocess
 import fcntl
 import os
+import re
+from collections import defaultdict
 from pathlib import Path
 from config import *
 
@@ -51,6 +53,18 @@ class FileLock:
             except:
                 pass
 
+def extract_folder_key(folder_name: str) -> str:
+    """提取文件夹名称的关键部分用于分组,去掉日期和末尾时间戳"""
+    # 先去掉末尾的6位数字时间戳
+    pattern1 = r'\s+\d{6}$'
+    name = re.sub(pattern1, '', folder_name)
+    
+    # 再去掉开头的日期部分 "YYMMDD Showroom - "
+    pattern2 = r'^\d{6}\s+Showroom\s+-\s+'
+    key = re.sub(pattern2, '', name)
+    
+    return key
+
 def find_ready_folders(parent_dir: Path):
     """查找所有准备好合并的文件夹，按名称排序合并"""
     folders = [f for f in parent_dir.iterdir() if f.is_dir()]
@@ -71,29 +85,36 @@ def find_ready_folders(parent_dir: Path):
     if not candidate_folders:
         return []
     
-    # 按文件夹名称排序（从小到大）
-    candidate_folders.sort(key=lambda x: x.name)
+# 按文件夹名称的关键部分分组
+    groups = defaultdict(list)
+    for folder in candidate_folders:
+        key = extract_folder_key(folder.name)
+        groups[key].append(folder)
     
-    # 创建一个合并项目，包含所有待合并的文件夹
-    if len(candidate_folders) == 1:
-        # 如果只有一个文件夹，直接处理
-        folder = candidate_folders[0]
-        return [{
-            'type': 'single',
-            'filelist': folder / FILELIST_NAME,
-            'name': folder.name,
-            'folders': [folder]
-        }]
-    else:
-        # 如果有多个文件夹，合并成一个
-        merged_name = candidate_folders[0].name  # 使用第一个文件夹的名称
-        merged_filelist = create_combined_filelist(candidate_folders, merged_name)
-        return [{
-            'type': 'merged',
-            'filelist': merged_filelist,
-            'name': merged_name,
-            'folders': candidate_folders
-        }]
+    # 为每个组创建合并项目
+    merge_items = []
+    for key, folder_list in groups.items():
+        folder_list.sort(key=lambda x: x.name)
+        
+        if len(folder_list) == 1:
+            folder = folder_list[0]
+            merge_items.append({
+                'type': 'single',
+                'filelist': folder / FILELIST_NAME,
+                'name': folder.name,
+                'folders': [folder]
+            })
+        else:
+            merged_name = folder_list[0].name
+            merged_filelist = create_combined_filelist(folder_list, merged_name)
+            merge_items.append({
+                'type': 'merged',
+                'filelist': merged_filelist,
+                'name': merged_name,
+                'folders': folder_list
+            })
+    
+    return merge_items
 
 def create_combined_filelist(folders_list, merged_name):
     """创建合并的filelist.txt"""
