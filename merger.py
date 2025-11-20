@@ -218,10 +218,45 @@ def upload_if_needed(success_count):
         elif ENABLE_AUTO_UPLOAD and not UPLOAD_AVAILABLE:
             log("自动上传已启用但上传模块不可用")
 
-def merge_once():
-    """执行一次合并检查（用于脚本调用）"""
-    success_count = merge_all_ready()
-    upload_if_needed(success_count)
+def merge_once(target_folders=None):  # 改成复数
+    """执行一次合并操作
+    
+    Args:
+        target_folders: 指定要合并的文件夹列表(属于同一个直播)
+    """
+    
+    if target_folders:
+        # 只处理指定的文件夹组
+        folders_to_merge = target_folders
+        
+        # 为这组文件夹创建合并项目
+        if len(folders_to_merge) == 1:
+            folder = folders_to_merge[0]
+            item = {
+                'type': 'single',
+                'filelist': folder / FILELIST_NAME,
+                'name': folder.name,
+                'folders': [folder]
+            }
+        else:
+            # 多个文件夹，创建合并filelist
+            merged_name = folders_to_merge[0].name
+            merged_filelist = create_combined_filelist(folders_to_merge, merged_name)
+            item = {
+                'type': 'merged',
+                'filelist': merged_filelist,
+                'name': merged_name,
+                'folders': folders_to_merge
+            }
+        
+        # 执行合并
+        success = merge_item(item)
+        upload_if_needed(1 if success else 0)
+        
+    else:
+        # 原来的逻辑:合并所有准备好的文件夹
+        success_count = merge_all_ready()
+        upload_if_needed(success_count)
 
 if __name__ == "__main__":
     # 可以选择运行模式

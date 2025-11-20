@@ -21,6 +21,21 @@ LAST_QUOTA_EXHAUSTED_DATE = None
 JST = ZoneInfo("Asia/Tokyo")
 PACIFIC = ZoneInfo("America/Los_Angeles")
 
+# 加载成员配置
+def load_members_config():
+    """从 members.json 加载成员配置"""
+    try:
+        with open(MEMBERS_JSON_PATH, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            return data.get('members', [])
+    except Exception as e:
+        if DEBUG_MODE:
+            log(f"加载 members.json 失败: {e}")
+        return []
+
+# 全局成员列表
+MEMBERS = load_members_config()
+
 class FileLock:
     """文件锁类，防止多个进程同时处理同一个文件"""
     
@@ -71,11 +86,14 @@ def convert_title_to_japanese(title: str) -> str:
     """
     converted_title = title
     
-    # 应用映射转换
-    for jp_name, en_name in EN_TO_JP.items():
-        # 注意：这里颠倒了键值对，因为config中是 jp_name: en_name 格式
-        # 我们需要将英文转换为日文，所以要反过来
-        converted_title = converted_title.replace(en_name, jp_name)
+    # 遍历所有成员，进行名字转换
+    for member in MEMBERS:
+        en_name = member.get('name_en', '')
+        jp_name = member.get('name_jp', '')
+        
+        if en_name and jp_name:
+            # 将英文名替换为日文名
+            converted_title = converted_title.replace(en_name, jp_name)
     
     if DEBUG_MODE and converted_title != title:
         log(f"标题转换: {title} -> {converted_title}")
@@ -148,6 +166,51 @@ def get_authenticated_service():
         except Exception as e:
             if DEBUG_MODE:
                 log(f"保存token失败: {e}")
+
+    return build("youtube", "v3", credentials=creds)
+
+def get_authenticated_service_alt():
+    """获取副账号的已认证YouTube服务对象"""
+    creds = None
+    
+    # 加载已保存的凭据
+    if YOUTUBE_TOKEN_PATH_ALT.exists():
+        try:
+            with open(YOUTUBE_TOKEN_PATH_ALT, "rb") as token_file:
+                creds = pickle.load(token_file)
+        except Exception as e:
+            if DEBUG_MODE:
+                log(f"加载副账号token失败: {e}")
+            creds = None
+
+    # 检查凭据是否有效
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+            except Exception as e:
+                if DEBUG_MODE:
+                    log(f"刷新副账号token失败: {e}")
+                creds = None
+        
+        # 如果凭据无效,重新认证
+        if not creds:
+            if not YOUTUBE_CLIENT_SECRET_PATH_ALT.exists():
+                raise FileNotFoundError(f"副账号客户端密钥文件不存在: {YOUTUBE_CLIENT_SECRET_PATH_ALT}")
+            
+            flow = InstalledAppFlow.from_client_secrets_file(
+                str(YOUTUBE_CLIENT_SECRET_PATH_ALT), YOUTUBE_SCOPES
+            )
+            creds = flow.run_local_server(port=0)
+
+        # 保存凭据
+        try:
+            YOUTUBE_TOKEN_PATH_ALT.parent.mkdir(parents=True, exist_ok=True)
+            with open(YOUTUBE_TOKEN_PATH_ALT, "wb") as token_file:
+                pickle.dump(creds, token_file)
+        except Exception as e:
+            if DEBUG_MODE:
+                log(f"保存副账号token失败: {e}")
 
     return build("youtube", "v3", credentials=creds)
 
@@ -247,52 +310,94 @@ def upload_video(
 ) -> str | None:
     """
     上传视频到YouTube
-    
-    Args:
-        file_path: 视频文件路径
-        title: 视频标题（None时使用配置默认值或文件名）
-        description: 视频描述（None时使用配置默认值）
-        tags: 标签列表（None时使用配置默认值）
-        category_id: 分类ID（None时使用配置默认值）
-        playlist_id: 播放列表ID（None时使用配置默认值）
-    
-    Returns:
-        视频ID或None（如果失败）
     """
     file_path_obj = Path(file_path)
     if not file_path_obj.exists():
         log(f"文件不存在: {file_path}")
         return None
     
+    # 判断是否是橋本陽菜的视频
+    # 检查文件名中是否包含橋本陽菜的英文或日文名
+    is_hashimoto = False
+    for member in MEMBERS:
+        if member.get('id') == 'hashimoto_haruna':
+            en_name = member.get('name_en', '')
+            jp_name = member.get('name_jp', '')
+            
+            if en_name in file_path_obj.stem or jp_name in file_path_obj.stem:
+                is_hashimoto = True
+                break
+    
     try:
-        youtube = get_authenticated_service()
+        if is_hashimoto:
+            youtube = get_authenticated_service()
+            if VERBOSE_LOGGING:
+                log("使用主账号上传 (橋本陽菜)")
+        else:
+            youtube = get_authenticated_service_alt()
+            if VERBOSE_LOGGING:
+                log("使用副账号上传 (其他成员)")
     except Exception as e:
         log(f"获取YouTube服务失败: {e}")
         return None
     
+    # 检测视频属于哪个成员,并获取其YouTube配置
+    member_config = None
+    for member in MEMBERS:
+        en_name = member.get('name_en', '')
+        jp_name = member.get('name_jp', '')
+
+        if (en_name and en_name in file_path_obj.stem) or \
+           (jp_name and jp_name in file_path_obj.stem):
+            member_config = member.get('youtube', {})
+            if VERBOSE_LOGGING:
+                log(f"检测到成员: {jp_name or en_name}")
+            break
+
     # 使用配置的默认值和文件名处理标题
     if title is None:
-        if YOUTUBE_DEFAULT_TITLE:
+        # 优先使用成员配置的标题模板
+        if member_config and member_config.get('title_template'):
+            title = member_config['title_template']
+        elif YOUTUBE_DEFAULT_TITLE:
             title = YOUTUBE_DEFAULT_TITLE
         else:
             # 使用文件名作为标题
             title = file_path_obj.stem
-        
+
         # 应用日文名字转换
         title = convert_title_to_japanese(title)
-    
+
     if description is None:
         upload_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        description = YOUTUBE_DEFAULT_DESCRIPTION.format(upload_time=upload_time)
-    
+        # 优先使用成员配置的描述模板
+        if member_config and member_config.get('description_template'):
+            description = member_config['description_template'].format(upload_time=upload_time)
+        else:
+            description = YOUTUBE_DEFAULT_DESCRIPTION.format(upload_time=upload_time)
+
     if tags is None:
-        tags = YOUTUBE_DEFAULT_TAGS.copy()
-    
+        # 优先使用成员配置的标签
+        if member_config and member_config.get('tags'):
+            tags = member_config['tags'].copy()
+        else:
+            tags = YOUTUBE_DEFAULT_TAGS.copy()
+
     if category_id is None:
-        category_id = YOUTUBE_DEFAULT_CATEGORY_ID
-    
+        # 优先使用成员配置的分类
+        if member_config and member_config.get('category_id'):
+            category_id = member_config['category_id']
+        else:
+            category_id = YOUTUBE_DEFAULT_CATEGORY_ID
+
     if playlist_id is None:
-        playlist_id = YOUTUBE_PLAYLIST_ID
+        # 优先使用成员配置的播放列表
+        if member_config and member_config.get('playlist_id'):
+            playlist_id = member_config['playlist_id']
+            if VERBOSE_LOGGING:
+                log(f"使用成员播放列表: {playlist_id}")
+        else:
+            playlist_id = YOUTUBE_PLAYLIST_ID
     
     # 构建上传请求
     body = {
@@ -372,19 +477,11 @@ def handle_merged_video(mp4_path: Path) -> bool:
         if VERBOSE_LOGGING:
             log(f"{mp4_path.name} 已上传，跳过")
         return True
-
-    # 从文件名生成标题，并应用日文转换
-    title = mp4_path.stem
-    title = convert_title_to_japanese(title)
-    # 生成描述和标签（与upload_video函数中的逻辑一致）
-    upload_time_for_desc = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    description = YOUTUBE_DEFAULT_DESCRIPTION.format(upload_time=upload_time_for_desc)
-    tags = YOUTUBE_DEFAULT_TAGS.copy()
     
     video_id = None
     
     try:
-        video_id = upload_video(str(mp4_path), title=title, description=description, tags=tags)
+        video_id = upload_video(str(mp4_path))
     except HttpError as e:
         if e.resp.status == 403 and 'quotaExceeded' in str(e):
             log("检测到上传配额用尽，暂停上传，等待配额重置后继续。")
@@ -399,6 +496,32 @@ def handle_merged_video(mp4_path: Path) -> bool:
         return False
 
     if video_id:
+        # 获取实际使用的标题、描述和标签(用于保存上传信息)
+        title = mp4_path.stem
+        title = convert_title_to_japanese(title)
+
+        # 检测成员配置
+        member_config = None
+        for member in MEMBERS:
+            en_name = member.get('name_en', '')
+            jp_name = member.get('name_jp', '')
+            if (en_name and en_name in mp4_path.stem) or \
+               (jp_name and jp_name in mp4_path.stem):
+                member_config = member.get('youtube', {})
+                break
+            
+        # 生成描述和标签
+        upload_time_for_desc = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if member_config and member_config.get('description_template'):
+            description = member_config['description_template'].format(upload_time=upload_time_for_desc)
+        else:
+            description = YOUTUBE_DEFAULT_DESCRIPTION.format(upload_time=upload_time_for_desc)
+
+        if member_config and member_config.get('tags'):
+            tags = member_config['tags'].copy()
+        else:
+            tags = YOUTUBE_DEFAULT_TAGS.copy()
+
         mark_as_uploaded(mp4_path, video_id)
         log(f"{mp4_path.name} 上传成功并已标记")
         

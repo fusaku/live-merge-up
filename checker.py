@@ -1,11 +1,30 @@
 import time
 import subprocess
+import cx_Oracle
+import os
+import threading
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import *
 from merger import merge_once
 from datetime import datetime
+from typing import Optional
+from config import (
+    WALLET_DIR,
+    DB_USER,
+    DB_PASSWORD,
+    DB_TABLE,
+    TNS_ALIAS
+)
+from queue import Queue
+from threading import Thread
+
+os.environ["TNS_ADMIN"] = WALLET_DIR # 新增
+
+# 在全局变量区域添加
+merge_queue = Queue()  # 合并任务队列
+merge_lock = threading.Lock()  # 合并锁（可选，Queue本身是线程安全的）
 
 # ========================= 文件夹操作 =========================
 
@@ -43,6 +62,123 @@ def all_folders_completed(folders):
 
 
 # ========================= 文件状态检查 =========================
+def group_folders_by_member(folders):
+    """将文件夹按成员分组,根据ts文件时间戳判断是否为同一场直播(支持跨日)"""
+    from collections import defaultdict
+    groups = defaultdict(list)
+    
+    # 先按成员ID分组
+    member_folders = defaultdict(list)
+    for folder in folders:
+        member_id = extract_member_name_from_folder(folder.name)
+        if member_id:
+            member_folders[member_id].append(folder)
+        else:
+            # 解析失败的单独分组
+            groups[f"unknown_{folder.name}"].append(folder)
+    
+    # 对每个成员的文件夹按创建时间排序,然后根据ts文件时间判断是否连续
+    for member_id, member_folder_list in member_folders.items():
+        # 按文件夹创建时间排序
+        member_folder_list.sort(key=lambda x: x.stat().st_ctime)
+        
+        if not member_folder_list:
+            continue
+            
+        # 用于标记当前直播组
+        current_group = []
+        group_index = 0
+        
+        for i, folder in enumerate(member_folder_list):
+            if i == 0:
+                # 第一个文件夹,直接加入当前组
+                current_group.append(folder)
+            else:
+                # 获取当前文件夹最早的ts文件时间
+                current_ts_files = list(folder.glob("*.ts"))
+                if not current_ts_files:
+                    # 没有ts文件,按文件夹时间判断(降级处理)
+                    prev_folder = member_folder_list[i-1]
+                    time_diff = folder.stat().st_ctime - prev_folder.stat().st_ctime
+                    if time_diff < 14400:  # 4小时
+                        current_group.append(folder)
+                    else:
+                        # 保存当前组并开始新组
+                        first_folder = current_group[0]
+                        date_part = first_folder.name[:6]
+                        key = f"{date_part}_{member_id}_{group_index}"
+                        groups[key] = current_group
+                        group_index += 1
+                        current_group = [folder]
+                    continue
+                
+                current_earliest_ts = min(current_ts_files, key=lambda x: x.stat().st_ctime)
+                current_ts_time = current_earliest_ts.stat().st_ctime
+                
+                # 获取前一个文件夹最晚的ts文件时间
+                prev_folder = current_group[-1]  # 用当前组的最后一个文件夹
+                prev_ts_files = list(prev_folder.glob("*.ts"))
+                
+                if prev_ts_files:
+                    prev_latest_ts = max(prev_ts_files, key=lambda x: x.stat().st_ctime)
+                    prev_ts_time = prev_latest_ts.stat().st_ctime
+                    
+                    # 计算两个文件夹ts文件的时间差
+                    time_gap = current_ts_time - prev_ts_time
+                    
+                    # 如果时间差小于5分钟(300秒),认为是同一场直播
+                    # 正常情况下ts文件每2秒一个,5分钟已经很宽松了
+                    if time_gap < 300:
+                        current_group.append(folder)
+                        if DEBUG_MODE:
+                            log(f"文件夹 {folder.name} 与前一个文件夹ts时间差 {time_gap:.0f}秒,判定为同一场直播")
+                    else:
+                        # 时间差太大,说明是新的直播
+                        if DEBUG_MODE:
+                            log(f"文件夹 {folder.name} 与前一个文件夹ts时间差 {time_gap:.0f}秒,判定为新直播")
+                        
+                        # 保存当前组
+                        first_folder = current_group[0]
+                        date_part = first_folder.name[:6]
+                        key = f"{date_part}_{member_id}_{group_index}"
+                        groups[key] = current_group
+                        
+                        # 开始新组
+                        group_index += 1
+                        current_group = [folder]
+                else:
+                    # 前一个文件夹没有ts文件,降级到文件夹时间判断
+                    time_diff = folder.stat().st_ctime - prev_folder.stat().st_ctime
+                    if time_diff < 14400:
+                        current_group.append(folder)
+                    else:
+                        first_folder = current_group[0]
+                        date_part = first_folder.name[:6]
+                        key = f"{date_part}_{member_id}_{group_index}"
+                        groups[key] = current_group
+                        group_index += 1
+                        current_group = [folder]
+        
+        # 保存最后一组
+        if current_group:
+            first_folder = current_group[0]
+            date_part = first_folder.name[:6]
+            key = f"{date_part}_{member_id}_{group_index}"
+            groups[key] = current_group
+    
+    return groups
+
+def has_matching_subtitle_for_group(group_folders):
+    """检查一组文件夹(同一个直播)是否有对应的字幕文件
+    
+    只需要检查组内最早的文件夹,因为字幕是按直播生成的,不是按文件夹
+    """
+    if not group_folders:
+        return False
+    
+    # 取最早的文件夹作为代表
+    earliest_folder = min(group_folders, key=lambda x: x.stat().st_ctime)
+    return has_matching_subtitle_file(earliest_folder)
 
 def is_file_stable(file_path: Path, stable_time: int = FILE_STABLE_TIME):
     """检查文件是否稳定（在指定时间内没有被修改）"""
@@ -191,18 +327,73 @@ def get_earliest_active_folder(all_folders):
     # 返回创建时间最早的文件夹
     return min(active_folders, key=lambda x: x.stat().st_ctime)
 
-def read_is_live():
-    file_path = Path("/home/ubuntu/temp/is_live.txt")
+# ========================= 网络状态检查 (数据库) =========================
+
+def read_is_live(member_id: str):
+    """从数据库读取指定成员的直播状态 (每次操作建立新连接)"""
+    
+    # 每次调用时，在 try 块内建立和关闭连接，确保连接有效性和资源释放
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            line = f.readline().strip()  # 读第一行
-        # 格式类似 "2025-08-30 00:22:15 | is_live=True"
-        if "is_live=True" in line:
-            return True
-        else:
-            return False
-    except FileNotFoundError:
-        return False  # 文件不存在就当作没开播
+        # 使用 'with' 语句保证连接和游标自动关闭
+        with cx_Oracle.connect(user=DB_USER, password=DB_PASSWORD, dsn=TNS_ALIAS) as conn:
+            with conn.cursor() as cursor:
+                # 查询指定成员的状态
+                query = f"""
+                    SELECT IS_LIVE
+                    FROM {DB_TABLE}
+                    WHERE MEMBER_ID = :member_id
+                """
+                
+                cursor.execute(query, {'member_id': member_id})
+                result = cursor.fetchone()
+                
+                if result:
+                    # IS_LIVE 字段 (1=True, 0=False)
+                    is_live = bool(result[0])
+                    if VERBOSE_LOGGING:
+                        log(f"从数据库读取状态: 成员 {member_id}, is_live={is_live}")
+                    return is_live
+                else:
+                    if VERBOSE_LOGGING:
+                        log(f"数据库中未找到成员 {member_id} 的记录")
+                    return False
+            
+    except Exception as e:
+        # 捕获连接失败或查询失败的错误
+        log(f"从数据库读取状态失败: {e}")
+        return False
+
+def extract_member_name_from_folder(folder_name: str) -> Optional[str]:
+    """从文件夹名称中提取人名部分，用于模糊匹配数据库中的 member_id"""
+    try:
+        # 文件夹格式: "日期 Showroom - 团队信息 人名 时间戳"
+        parts = folder_name.split(" - ")
+        if len(parts) >= 2:
+            # parts[1] 应该是 "AKB48 Team 8 Hashimoto Haruna 233156"
+            name_parts = parts[1].split()
+            
+            # 过滤掉时间戳 (6位数字)
+            filtered_parts = [p for p in name_parts if not (p.isdigit() and len(p) == 6)]
+            
+            # 通常人名是最后两个单词 (姓 名字)
+            if len(filtered_parts) >= 2:
+                # 拼接成 "hashimoto_haruna" 格式 (注意数据库中的格式)
+                last_name = filtered_parts[-2].lower()
+                first_name = filtered_parts[-1].lower()
+                
+                # 尝试使用 "姓_名" 格式匹配数据库ID
+                return f"{last_name}_{first_name}"
+                
+            # 如果只有一个人名部分，则返回该部分
+            elif len(filtered_parts) == 1:
+                return filtered_parts[-1].lower()
+
+    except Exception as e:
+        if DEBUG_MODE:
+            log(f"解析人名失败: {folder_name}, 错误: {e}")
+            
+    return None
+
 # ========================= 文件检查和处理 =========================
 
 def check_ts_file(ts_file: Path):
@@ -422,149 +613,192 @@ def cleanup_old_folder_states(folder_states: dict, active_folders: list, current
             log(f"清理过期文件夹状态: {folder_path.name}")
         del folder_states[folder_path]
 
+def merge_worker():
+    """独立的合并工作线程，从队列中串行执行合并任务"""
+    log("✨ 合并工作线程已启动")
+    
+    while True:
+        try:
+            # 从队列获取任务，阻塞等待
+            task = merge_queue.get()
+            
+            if task is None:  # None 是停止信号
+                log("合并工作线程收到停止信号")
+                break
+            
+            group_key, group_folders = task
+            
+            try:
+                log(f"🔄 [合并队列] 开始合并: {group_key}")
+                earliest_folder = min(group_folders, key=lambda x: x.stat().st_ctime)
+                merged_video = OUTPUT_DIR / f"{earliest_folder.name}{OUTPUT_EXTENSION}"
+                
+                if not merged_video.exists():
+                    merge_once(target_folders=group_folders)
+                    log(f"✅ [合并队列] 完成: {group_key}")
+                else:
+                    log(f"⏭️  [合并队列] 文件已存在，跳过: {group_key}")
+                    
+            except Exception as e:
+                log(f"❌ [合并队列] 失败 {group_key}: {e}")
+                import traceback
+                log(traceback.format_exc())
+            finally:
+                merge_queue.task_done()  # 标记任务完成
+                
+        except Exception as e:
+            log(f"合并工作线程异常: {e}")
+            time.sleep(1)
+
 # ========================= 主循环 =========================
 
 def main_loop():
-    """主循环：持续监控目录并检查文件"""
     log("开始监控直播文件夹...")
     
-    # 用于跟踪每个文件夹的检查状态
-    folder_states = {}
-    merge_called = False  # 防止重复调用merge
-    subtitle_check_count = {}  # 记录每个文件夹的字幕检查次数
+    # 启动合并工作线程
+    merge_thread = Thread(target=merge_worker, daemon=True, name="MergeWorker")
+    merge_thread.start()
     
-    while True:
-        current_time = time.time()
-        
-        # a: 网络状态 - 检查直播状态
-        is_streaming = read_is_live()
-        
-        # 获取直播文件夹
-        if PROCESS_ALL_FOLDERS:
-            all_folders = find_all_live_folders(PARENT_DIR)
-            # 过滤掉已完成的文件夹
-            all_folders = [f for f in all_folders if not has_been_merged(f)]
-            if len(all_folders) > MAX_CONCURRENT_FOLDERS:
-                all_folders = all_folders[-MAX_CONCURRENT_FOLDERS:]
-        else:
-            latest_folder = find_latest_live_folder(PARENT_DIR)
-            if latest_folder and not has_been_merged(latest_folder):
-                all_folders = [latest_folder]
+    folder_states = {}
+    subtitle_check_count = {}
+    submitted_merges = set()  # 添加这行：追踪已提交到队列的组
+    
+    try:
+        while True:
+            current_time = time.time()
+            
+            # 获取直播文件夹
+            if PROCESS_ALL_FOLDERS:
+                all_folders = find_all_live_folders(PARENT_DIR)
+                all_folders = [f for f in all_folders if not has_been_merged(f)]
+                if len(all_folders) > MAX_CONCURRENT_FOLDERS:
+                    all_folders = all_folders[-MAX_CONCURRENT_FOLDERS:]
             else:
-                all_folders = []
-        
-        if not all_folders:
-            if DEBUG_MODE:
-                log("未找到直播文件夹，等待中...")
-            time.sleep(CHECK_INTERVAL)
-            continue
-        
-        # b: 文件活跃度 - 检查是否还有文件在更新
-        files_active = not is_really_stream_ended(all_folders, FINAL_INACTIVE_THRESHOLD)
-        
-        # c: 字幕文件匹配 - 检查最早的活跃文件夹是否有对应字幕文件
-        if files_active:
-            # 文件还活跃时，检查最早的活跃文件夹
-            earliest_folder = get_earliest_active_folder(all_folders)
-        else:
-            # 文件不活跃时，检查最早的文件夹（不管是否活跃）
-            earliest_folder = min(all_folders, key=lambda x: x.stat().st_ctime) if all_folders else None
-        # 字幕文件检查逻辑，支持重试机制
-        if earliest_folder:
-            folder_key = earliest_folder.name
-            if folder_key not in subtitle_check_count:
-                subtitle_check_count[folder_key] = 0
+                latest_folder = find_latest_live_folder(PARENT_DIR)
+                if latest_folder and not has_been_merged(latest_folder):
+                    all_folders = [latest_folder]
+                else:
+                    all_folders = []
+
+            if not all_folders:
+                if DEBUG_MODE:
+                    log("未找到直播文件夹,等待中...")
+                time.sleep(CHECK_INTERVAL)
+                continue
             
-            subtitle_check_count[folder_key] += 1
-            subtitle_exists = has_matching_subtitle_file(earliest_folder)
+            # ==== 直接进入按组处理,不需要全局判断 ====
+            grouped = group_folders_by_member(all_folders)
             
-            # 如果检查了5次还没有字幕文件，判定为无字幕视频
-            if not subtitle_exists and subtitle_check_count[folder_key] >= 5:
-                log(f"字幕文件检查已达到 {subtitle_check_count[folder_key]} 次，判定为无字幕视频: {folder_key}")
-                subtitle_exists = True  # 强制设为True，允许合并
-        else:
-            subtitle_exists = False
+            for group_key, group_folders in grouped.items():
+                member_id = extract_member_name_from_folder(group_folders[0].name)
                 
-        # 输出当前状态用于调试
-        if VERBOSE_LOGGING:
-            log(f"状态检查: 网络直播={is_streaming}, 文件活跃={files_active}, 字幕存在={subtitle_exists}")
-            if earliest_folder:
-                log(f"最早活跃文件夹: {earliest_folder.name}")
-        
-        # 根据新的逻辑判断
-        if is_streaming or files_active:
-            # 情况1-5: 还在直播中或录制中
-            log(f"直播/录制进行中，处理 {len(all_folders)} 个文件夹")
-            merge_called = False  # 重置合并标志
-            
-            # 处理每个文件夹的检查逻辑
-            completed_folders = []
-            active_folders = 0
-            waiting_folders = 0
-            
-            for ts_dir in all_folders:
-                try:
-                    result = process_single_folder(ts_dir, folder_states, all_folders, current_time)
-                    if result is True:
-                        completed_folders.append(ts_dir)
-                    elif result is False:
-                        if is_live_active(ts_dir):
-                            active_folders += 1
+                # 该组的网络状态
+                if member_id:
+                    group_is_streaming = read_is_live(member_id)
+                else:
+                    group_is_streaming = False
+                    if DEBUG_MODE:
+                        log(f"无法提取成员ID: {group_key}")
+                
+                # 该组的文件活跃度
+                group_files_active = not is_really_stream_ended(group_folders, FINAL_INACTIVE_THRESHOLD)
+                
+                # --- 新的字幕检查和合并逻辑 ---
+                
+                # 1. 跳过已经完成合并的组
+                group_is_merged = all(has_been_merged(f) for f in group_folders)
+                if group_is_merged:
+                    continue  # 跳过该组，处理下一个
+
+                group_can_merge = False  # 标记该组是否可以进入最终检查/合并流程
+                
+                # 2. 如果直播结束且文件已稳定 (触发最终检查/合并的条件)
+                if not group_is_streaming and not group_files_active:
+                    
+                    # 开始字幕检查计数和强制通过逻辑 (不再依赖 has_been_merged)
+                    if group_key not in subtitle_check_count:
+                        subtitle_check_count[group_key] = 0
+                        
+                    subtitle_check_count[group_key] += 1
+                    group_has_subtitle = has_matching_subtitle_for_group(group_folders)
+                    
+                    # 【强制退出等待】字幕未找到，但检查次数达到 5 次
+                    if not group_has_subtitle and subtitle_check_count[group_key] >= 5:
+                        log(f"字幕文件检查已达到 {subtitle_check_count[group_key]} 次,判定为无字幕视频: {group_key}")
+                        group_has_subtitle = True  # 强制通过
+                    
+                    if group_has_subtitle:
+                        group_can_merge = True  # 字幕找到或已强制通过，允许合并
+                        log(f"[{group_key}] 满足合并条件 (字幕找到或超时)，开始最终检查。")
+                    else:
+                        # 仍在等待字幕，计数器未达到 5 次
+                        log(f"[{group_key}] 等待字幕文件生成中... (第 {subtitle_check_count[group_key]} 次检查)")
+
+                # 3. 如果满足合并条件 (group_can_merge)
+                if group_can_merge:
+                    
+                    # (A) 最终检查 (调用 finalize_live_check，此时会创建 filelist.txt 标记)
+                    for ts_dir in group_folders:
+                        if not has_been_merged(ts_dir):  # 再次检查防止重复操作
+                            log(f"对已结束的直播进行最终检查: {ts_dir.name}")
+                            # 确保 folder_states 中有该文件夹的状态
+                            if ts_dir not in folder_states:
+                                folder_states[ts_dir] = {'checked_files': set(), 'valid_files': [], 'error_logs': []}
+                            
+                            finalize_live_check(
+                                ts_dir,
+                                folder_states[ts_dir]['checked_files'],
+                                folder_states[ts_dir]['valid_files'],
+                                folder_states[ts_dir]['error_logs']
+                            )
+                    # (B) 合并该组 - 提交到合并队列
+                    if all(has_been_merged(f) for f in group_folders):
+                        earliest_folder = min(group_folders, key=lambda x: x.stat().st_ctime)
+                        merged_video = OUTPUT_DIR / f"{earliest_folder.name}{OUTPUT_EXTENSION}"
+
+                        if not merged_video.exists():
+                            log(f"📋 直播组 {group_key} 已完成检查，加入合并队列 (当前队列: {merge_queue.qsize()} 个任务)")
+                            merge_queue.put((group_key, group_folders))
+                            submitted_merges.add(group_key)  # 标记为已提交
                         else:
-                            waiting_folders += 1
-                except Exception as e:
-                    log(f"处理文件夹 {ts_dir.name} 时出错: {e}")
-                    continue
-            
-            if VERBOSE_LOGGING and (active_folders > 0 or waiting_folders > 0 or completed_folders):
-                log(f"状态摘要: {active_folders} 个活动, {waiting_folders} 个等待结束, {len(completed_folders)} 个已完成")
-        
-        elif subtitle_exists:
-            # 情况6: 直播结束，录制完成，可以合并
-            log("检测到直播结束且录制完成（字幕文件已生成），开始最终检查和合并...")
-            
-            # 对所有文件夹进行最终检查
-            for ts_dir in all_folders:
-                if not has_been_merged(ts_dir) and has_files_to_check(ts_dir):
-                    log(f"对已结束的直播进行最终检查: {ts_dir.name}")
-                    if ts_dir not in folder_states:
-                        folder_states[ts_dir] = {
-                            'checked_files': set(),
-                            'valid_files': [],
-                            'error_logs': [],
-                            'last_check': 0,
-                            'creation_time': current_time
-                        }
+                            log(f"⏭️  直播组 {group_key} 合并文件已存在，跳过")
 
-                    finalize_live_check(
-                        ts_dir,
-                        folder_states[ts_dir]['checked_files'],
-                        folder_states[ts_dir]['valid_files'],
-                        folder_states[ts_dir]['error_logs']
-                    )
+                # 4. 如果仍在直播/文件活跃，则继续执行增量检查
+                elif group_is_streaming or group_files_active:
+                    for ts_dir in group_folders:
+                        if has_files_to_check(ts_dir) and not has_been_merged(ts_dir):
+                            # 直接调用 process_single_folder，让它自己管理 folder_states 字典中的状态
+                            process_single_folder(ts_dir, folder_states, all_folders, current_time)
             
-            # 检查是否所有文件夹都已完成，然后合并
-            if all_folders_completed(all_folders) and not merge_called:
-                log("所有文件夹检查完成，开始合并...")
-                merge_once()
-                merge_called = True
-        
-        else:
-            # 情况7: 没有直播或字幕还未生成
-            if DEBUG_MODE:
-                log("没有检测到活跃的直播，或字幕文件尚未生成，等待中...")
-            merge_called = False  # 重置合并标志
-        
-        # 清理过期状态
-        cleanup_old_folder_states(folder_states, all_folders, current_time)
-        # 清理字幕检查计数器
-        folders_to_cleanup = [key for key in subtitle_check_count.keys() 
-                             if not any(f.name == key for f in all_folders)]
-        for key in folders_to_cleanup:
-            del subtitle_check_count[key]
-        
-        time.sleep(CHECK_INTERVAL)
+            # 清理过期状态
+            cleanup_old_folder_states(folder_states, all_folders, current_time)
+            
+            # 清理字幕检查计数器
+            active_group_keys = set(grouped.keys())
 
+            # 找出不再活跃的 group_key 进行清理
+            keys_to_remove = [key for key in subtitle_check_count.keys() 
+                              if key not in active_group_keys]
+            
+            for key in keys_to_remove:
+                if DEBUG_MODE:
+                    log(f"清理字幕计数器中已完成/不活跃的组: {key}")
+                del subtitle_check_count[key]
+                # 同时清理已提交的合并记录
+                if key in submitted_merges:
+                    submitted_merges.discard(key)
+            
+            time.sleep(CHECK_INTERVAL)
+            
+    except KeyboardInterrupt:
+        log("收到停止信号,等待合并队列完成...")
+        merge_queue.join()  # 等待所有合并任务完成
+        merge_queue.put(None)  # 发送停止信号
+        log("程序退出")
+    except Exception as e:
+        log(f"主循环发生错误: {e}")
+        import traceback
+        log(traceback.format_exc())
 
 if __name__ == "__main__":
     main_loop()
