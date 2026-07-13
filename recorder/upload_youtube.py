@@ -324,25 +324,40 @@ def send_upload_notification(file_name: str, video_id: str, success: bool = True
 
 def add_video_to_playlist(youtube, video_id: str, playlist_id: str):
     """将视频添加到播放列表"""
-    try:
-        request = youtube.playlistItems().insert(
-            part="snippet",
-            body={
-                "snippet": {
-                    "playlistId": playlist_id,
-                    "resourceId": {
-                        "kind": "youtube#video",
-                        "videoId": video_id
+
+    for retry in range(5):
+        try:
+            request = youtube.playlistItems().insert(
+                part="snippet",
+                body={
+                    "snippet": {
+                        "playlistId": playlist_id,
+                        "resourceId": {
+                            "kind": "youtube#video",
+                            "videoId": video_id
+                        }
                     }
                 }
-            }
-        )
-        response = request.execute()
-        logging.info(f"已添加视频 {video_id} 到播放列表 {playlist_id}")
-        return True
-    except HttpError as e:
-        logging.error(f"添加到播放列表失败: {e}")
-        return False
+            )
+
+            request.execute()
+
+            logging.info(f"已添加视频 {video_id} 到播放列表 {playlist_id}")
+            return True
+
+        except HttpError as e:
+            logging.warning(f"添加播放列表失败({retry + 1}/5): {e}")
+
+            try:
+                logging.warning(e.content.decode("utf-8"))
+            except Exception:
+                pass
+
+            if retry < 4:
+                time.sleep(10)
+            else:
+                logging.exception("添加播放列表最终失败")
+                return False
 
 def upload_video(
     file_path: str, 
@@ -470,6 +485,8 @@ def upload_video(
             "description": description,
             "tags": tags,
             "categoryId": category_id,
+            "defaultLanguage": "ja",       # ✅ 新增：设置标题和描述的默认语言为日语
+            "defaultAudioLanguage": "ja"   # ✅ 新增：设置视频原声/音频的默认语言为日语
         },
         "status": {
             "privacyStatus": YOUTUBE_PRIVACY_STATUS
