@@ -36,29 +36,35 @@ except ImportError:
 # 全局连接池
 _db_pool = None
 
-def get_db_pool():
-    """获取或创建数据库连接池(单例模式)"""
+def get_db_pool(max_attempts=5, retry_delay=3):
+    """获取或创建数据库连接池(单例模式)，带重试"""
     global _db_pool
-    
+
     if _db_pool is None:
-        try:
-            os.environ["TNS_ADMIN"] = WALLET_DIR
-            _db_pool = cx_Oracle.SessionPool(
-                user=DB_USER,
-                password=DB_PASSWORD,
-                dsn=TNS_ALIAS,
-                min=1,
-                max=5,
-                increment=1,
-                encoding="UTF-8",
-                nencoding="UTF-8",
-                threaded=True
-            )
-            logging.info("✓ 数据库连接池初始化成功")
-        except Exception as e:
-            logging.error(f"✗ 数据库连接池初始化失败: {e}")
-            return None
-    
+        os.environ["TNS_ADMIN"] = WALLET_DIR
+        for attempt in range(1, max_attempts + 1):
+            try:
+                _db_pool = cx_Oracle.SessionPool(
+                    user=DB_USER,
+                    password=DB_PASSWORD,
+                    dsn=TNS_ALIAS,
+                    min=1,
+                    max=5,
+                    increment=1,
+                    encoding="UTF-8",
+                    nencoding="UTF-8",
+                    threaded=True
+                )
+                logging.info("✓ 数据库连接池初始化成功")
+                break
+            except Exception as e:
+                logging.error(f"✗ 数据库连接池初始化失败 (第 {attempt}/{max_attempts} 次): {e}")
+                if attempt < max_attempts:
+                    time.sleep(retry_delay)
+                else:
+                    logging.critical("数据库连接池多次重试后仍然失败，放弃")
+                    return None
+
     return _db_pool
 
 
