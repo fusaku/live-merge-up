@@ -560,15 +560,15 @@ def upload_video(
 
                 try:
                     status, response = request.next_chunk()
-                    signal.alarm(0)  # 成功后取消闹钟   
-
+                    
                     if status:
                         progress = int(status.progress() * 100)
                         logging.info(f"上传进度: {progress}% (重试 {retry_count}/{MAX_RETRIES})")    
 
-                except UploadTimeout:
-                    signal.alarm(0)  # 取消闹钟
-                    raise  # 抛给外层处理
+                finally:
+                    # 关键修改：无论成功、超时，还是抛出 SSL/EOF 等任何异常
+                    # 只要离开 try 块，必定无条件清空闹钟，防止污染后续的 sleep
+                    signal.alarm(0)
                 
             # 成功完成上传，跳出重试循环
             break
@@ -621,7 +621,13 @@ def upload_video(
 
     # 添加到播放列表
     if playlist_id:
-        add_video_to_playlist(youtube, video_id, playlist_id)
+        logging.info("等待 5 秒等待 YouTube 后端同步视频状态...")
+        time.sleep(5)  # 缓冲等待，避免立刻请求抛出 400 Bad Request
+        
+        playlist_success = add_video_to_playlist(youtube, video_id, playlist_id)
+        if not playlist_success:
+            logging.error(f"❌ 视频 {video_id} 已上传，但添加到播放列表失败！")
+            return None  # 阻止标记为成功，以便下一轮重试
 
     return video_id
 
