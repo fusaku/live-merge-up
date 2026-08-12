@@ -322,11 +322,23 @@ def send_upload_notification(file_name: str, video_id: str, success: bool = True
     except Exception as e:
         logging.error(f"发送通知失败: {e}")
 
-def add_video_to_playlist(youtube, video_id: str, playlist_id: str):
+def add_video_to_playlist(youtube, video_id: str, playlist_id: str, account_id: str = 'account1'):
     """将视频添加到播放列表"""
-
     for retry in range(5):
         try:
+            # 关键：重试时重新获取 service，彻底建立全新的 SSL 连接
+            if retry > 0:
+                logging.info(f"正在刷新连接，重试添加播放列表 ({retry + 1}/5)...")
+                if account_id == 'account1':
+                    youtube = get_authenticated_service()
+                elif account_id == 'account2':
+                    youtube = get_authenticated_service_alt()
+            elif hasattr(youtube, '_http') and hasattr(youtube._http, 'close'):
+                try:
+                    youtube._http.close()
+                except Exception:
+                    pass
+
             request = youtube.playlistItems().insert(
                 part="snippet",
                 body={
@@ -345,18 +357,19 @@ def add_video_to_playlist(youtube, video_id: str, playlist_id: str):
             logging.info(f"已添加视频 {video_id} 到播放列表 {playlist_id}")
             return True
 
-        except HttpError as e:
+        except Exception as e:
             logging.warning(f"添加播放列表失败({retry + 1}/5): {e}")
 
             try:
-                logging.warning(e.content.decode("utf-8"))
+                if hasattr(e, 'content'):
+                    logging.warning(e.content.decode("utf-8"))
             except Exception:
                 pass
 
             if retry < 4:
                 time.sleep(10)
             else:
-                logging.exception("添加播放列表最终失败")
+                logging.error(f"❌ [播放列表失败] 视频 {video_id} 连续 5 次添加至播放列表 {playlist_id} 失败，彻底放弃")
                 return False
 
 def upload_video(
@@ -518,6 +531,13 @@ def upload_video(
     while retry_count < MAX_RETRIES:        
         # ========== 每次重试都重新创建完整的上传会话 ==========
         try:
+            # 必须新增：无论是否重试，上传前无条件关闭旧 Socket，强行触发全新 TLS/SSL 握手
+            if hasattr(youtube, '_http') and hasattr(youtube._http, 'close'):
+                try:
+                    youtube._http.close()
+                except Exception:
+                    pass
+
             # 如果是重试，重新获取 youtube 服务
             if retry_count > 0:
                 logging.info("重新获取YouTube服务...")
@@ -619,17 +639,79 @@ def upload_video(
     
     logging.info(f"上传完成，视频ID: {video_id}")
 
-    # 添加到播放列表
-    if playlist_id:
-        logging.info("等待 5 秒等待 YouTube 后端同步视频状态...")
-        time.sleep(5)  # 缓冲等待，避免立刻请求抛出 400 Bad Request
-        
-        playlist_success = add_video_to_playlist(youtube, video_id, playlist_id)
-        if not playlist_success:
-            logging.error(f"❌ 视频 {video_id} 已上传，但添加到播放列表失败！")
-            return None  # 阻止标记为成功，以便下一轮重试
+    # ================= 关键新增：假成功拦截校验 =================
+    logging.info("等待 5 秒等待 YouTube 后端同步视频状态...")
+    time.sleep(5)  # 缓冲等待
 
+    logging.info("🔍 正在校验 YouTube 后端视频处理状态...")
+    if not verify_video_status(youtube, video_id, account_id=account_id, check_seconds=15):
+        logging.error(f"🛑 视频 {video_id} 上传后被 YouTube 判定为损坏文件，放弃本次结果 (保留本地文件以供重试)")
+        return None  # 返回 None，防止写 .uploaded 标记和触发删除
+
+    # 解耦：添加到播放列表
+    if playlist_id:
+        try:
+            playlist_success = add_video_to_playlist(youtube, video_id, playlist_id, account_id)
+            if not playlist_success:
+                logging.warning(f"⚠️ 视频 {video_id} 已正常上传，但未能成功加入播放列表")
+        except Exception as e:
+            logging.error(f"⚠️ 添加播放列表时抛出未知异常: {e}")
+
+    # 只要视频本体成功拿到 video_id，就必须返回它，确保外层正常执行 mark_as_uploaded
     return video_id
+
+def verify_video_status(youtube, video_id: str, account_id: str = 'account1', check_seconds: int = 15) -> bool:
+    """
+    上传完成后短轮询检测视频真实状态，拦截“假成功”
+    """
+    start_time = time.time()
+    
+    # 1. 强制关闭大文件上传后残留的旧 Socket
+    if hasattr(youtube, '_http') and hasattr(youtube._http, 'close'):
+        try:
+            youtube._http.close()
+        except Exception:
+            pass
+
+    while time.time() - start_time < check_seconds:
+        try:
+            res = youtube.videos().list(
+                part="status,processingDetails", 
+                id=video_id
+            ).execute()
+            
+            items = res.get("items", [])
+            if not items:
+                logging.error(f"❌ [假成功拦截] 找不到视频 ID: {video_id}")
+                return False
+            
+            status = items[0].get("status", {})
+            processing = items[0].get("processingDetails", {})
+            
+            upload_status = status.get("uploadStatus")
+            rejection_reason = status.get("rejectionReason")
+            processing_status = processing.get("processingStatus")
+            
+            if upload_status in ["rejected", "failed"] or processing_status in ["failed", "terminated"]:
+                logging.error(f"❌ [假成功拦截] 视频 {video_id} 文件损坏，已被 YouTube 终止处理 (原因: {rejection_reason or upload_status})")
+                return False
+            
+            if upload_status in ["uploaded", "processed"] and processing_status in ["processing", "succeeded"]:
+                logging.info(f"✅ [状态校验通过] 视频 {video_id} 文件结构正常，已进入正常处理队列")
+                return True
+                
+        except Exception as e:
+            logging.warning(f"⚠️ 状态校验请求异常 (正在刷新连接): {e}")
+            # 2. 如果遇到 400 / SSL 异常，重新获取全新的 service 对象
+            if account_id == 'account1':
+                youtube = get_authenticated_service()
+            elif account_id == 'account2':
+                youtube = get_authenticated_service_alt()
+        
+        time.sleep(5)
+    
+    logging.info(f"ℹ️ [状态校验] {check_seconds} 秒内未检测到异常拒绝，判定为有效上传")
+    return True
 
 def handle_merged_video(mp4_path: Path) -> bool:
     """
